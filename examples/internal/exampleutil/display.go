@@ -51,8 +51,8 @@ func DisplayMessage(msg sdk.Message) {
 	case *sdk.SystemMessage:
 		// Skip noisy system init messages in examples.
 	case *sdk.StreamEvent:
-		if typ, _ := m.Event["type"].(string); typ != "" {
-			fmt.Printf("Stream event: %s\n", typ)
+		if eventType, _ := m.Event["type"].(string); eventType != "" {
+			fmt.Printf("Stream event: %s\n", eventType)
 		}
 	default:
 		fmt.Printf("Message: %#v\n", m)

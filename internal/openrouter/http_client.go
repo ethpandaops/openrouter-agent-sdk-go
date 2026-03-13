@@ -409,8 +409,8 @@ func normalizeChatResponseFormat(format map[string]any) map[string]any {
 	if len(format) == 0 {
 		return nil
 	}
-	typ, _ := format["type"].(string)
-	if typ == "json_schema" {
+	formatType, _ := format["type"].(string)
+	if formatType == "json_schema" {
 		if _, ok := format["json_schema"]; ok {
 			return cloneMap(format)
 		}
@@ -447,8 +447,8 @@ func normalizeResponsesTextFormat(format map[string]any) map[string]any {
 	if len(format) == 0 {
 		return nil
 	}
-	typ, _ := format["type"].(string)
-	if typ == "json_schema" {
+	formatType, _ := format["type"].(string)
+	if formatType == "json_schema" {
 		if schema, ok := format["schema"].(map[string]any); ok {
 			name, _ := format["name"].(string)
 			if strings.TrimSpace(name) == "" {

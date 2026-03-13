@@ -1432,8 +1432,8 @@ func parsePermissionUpdates(v any) []*permission.Update {
 			continue
 		}
 		up := &permission.Update{}
-		if typ, ok := m["type"].(string); ok {
-			up.Type = permission.UpdateType(typ)
+		if updateType, ok := m["type"].(string); ok {
+			up.Type = permission.UpdateType(updateType)
 		}
 		if mode, ok := m["mode"].(string); ok {
 			mv := permission.Mode(mode)

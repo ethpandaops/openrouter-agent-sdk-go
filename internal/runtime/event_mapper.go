@@ -91,8 +91,8 @@ func parseChunk(raw map[string]any) ([]chunkDelta, error) {
 }
 
 func parseResponsesChunk(raw map[string]any) ([]chunkDelta, error) {
-	typ, _ := raw["type"].(string)
-	switch typ {
+	eventType, _ := raw["type"].(string)
+	switch eventType {
 	case "":
 		return nil, nil
 	case "error", "response.error":

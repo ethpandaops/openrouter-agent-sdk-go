@@ -62,18 +62,18 @@ func decodeMCPConfig(raw []byte) (map[string]mcp.ServerConfig, error) {
 }
 
 func decodeSingleMCPServer(name string, cfg map[string]any) (mcp.ServerConfig, error) {
-	typ, _ := cfg["type"].(string)
-	typ = strings.ToLower(strings.TrimSpace(typ))
+	serverType, _ := cfg["type"].(string)
+	serverType = strings.ToLower(strings.TrimSpace(serverType))
 
-	if typ == "" {
+	if serverType == "" {
 		if _, ok := cfg["command"].(string); ok {
-			typ = string(mcp.ServerTypeStdio)
+			serverType = string(mcp.ServerTypeStdio)
 		} else if _, ok := cfg["url"].(string); ok {
-			typ = string(mcp.ServerTypeHTTP)
+			serverType = string(mcp.ServerTypeHTTP)
 		}
 	}
 
-	switch mcp.ServerType(typ) {
+	switch mcp.ServerType(serverType) {
 	case mcp.ServerTypeStdio:
 		command, _ := cfg["command"].(string)
 		args := stringSliceFromAny(cfg["args"])
@@ -102,7 +102,7 @@ func decodeSingleMCPServer(name string, cfg map[string]any) (mcp.ServerConfig, e
 	case mcp.ServerTypeSDK:
 		return nil, fmt.Errorf("mcp config server %q type sdk is unsupported in config loading", name)
 	default:
-		return nil, fmt.Errorf("mcp config server %q has unsupported type %q", name, typ)
+		return nil, fmt.Errorf("mcp config server %q has unsupported type %q", name, serverType)
 	}
 }
 
