@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,20 +75,47 @@ func collectResult(
 	iter func(func(openroutersdk.Message, error) bool),
 ) *openroutersdk.ResultMessage {
 	t.Helper()
+
 	var result *openroutersdk.ResultMessage
+
 	iter(func(msg openroutersdk.Message, err error) bool {
 		if err != nil {
+			// OpenRouter free-tier routing can land on providers
+			// whose limits don't match the requested parameters.
+			// Skip rather than fail so flaky routing doesn't break CI.
+			if isProviderRoutingError(err) {
+				t.Skipf("skipping due to provider routing error: %v", err)
+			}
+
 			t.Fatalf("unexpected error: %v", err)
 		}
+
 		if rm, ok := msg.(*openroutersdk.ResultMessage); ok {
 			result = rm
 		}
+
 		return true
 	})
+
 	if result == nil {
 		t.Fatal("expected result message")
 	}
+
 	return result
+}
+
+// isProviderRoutingError returns true when the error indicates an
+// OpenRouter free-tier provider routing issue (e.g., the selected
+// backend doesn't support the requested max_tokens).
+func isProviderRoutingError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := err.Error()
+
+	return strings.Contains(msg, "Provider returned error") ||
+		strings.Contains(msg, "maximum allowed is")
 }
 
 func waitForSession(

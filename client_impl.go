@@ -199,7 +199,6 @@ func (c *clientImpl) ReceiveResponse(ctx context.Context) iter.Seq2[Message, err
 
 		msgsClosed := false
 		errsClosed := false
-		resultSeen := false
 
 		for !msgsClosed || !errsClosed {
 			select {
@@ -208,21 +207,18 @@ func (c *clientImpl) ReceiveResponse(ctx context.Context) iter.Seq2[Message, err
 					msgsClosed = true
 					continue
 				}
-				if resultSeen {
-					continue
-				}
 				if !yield(msg, nil) {
 					return
 				}
 				if _, ok := msg.(*message.ResultMessage); ok {
-					resultSeen = true
+					return
 				}
 			case err, ok := <-errs:
 				if !ok {
 					errsClosed = true
 					continue
 				}
-				if err == nil || resultSeen {
+				if err == nil {
 					continue
 				}
 				if !yield(nil, err) {
