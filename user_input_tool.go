@@ -66,11 +66,13 @@ func userInputToolSchema() map[string]any {
 				"items": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"id":        map[string]any{"type": "string"},
-						"header":    map[string]any{"type": "string"},
-						"question":  map[string]any{"type": "string"},
-						"is_other":  map[string]any{"type": "boolean"},
-						"is_secret": map[string]any{"type": "boolean"},
+						"id":           map[string]any{"type": "string"},
+						"header":       map[string]any{"type": "string"},
+						"question":     map[string]any{"type": "string"},
+						"multiSelect":  map[string]any{"type": "boolean"},
+						"multi_select": map[string]any{"type": "boolean"},
+						"is_other":     map[string]any{"type": "boolean"},
+						"is_secret":    map[string]any{"type": "boolean"},
 						"options": map[string]any{
 							"type": "array",
 							"items": map[string]any{
@@ -134,11 +136,12 @@ func parseUserInputQuestion(raw map[string]any, index int) *userinput.Question {
 	}
 
 	out := &userinput.Question{
-		ID:       id,
-		Header:   stringValue(raw["header"]),
-		Question: question,
-		IsOther:  boolValue(raw["is_other"]),
-		IsSecret: boolValue(raw["is_secret"]),
+		ID:          id,
+		Header:      stringValue(raw["header"]),
+		Question:    question,
+		MultiSelect: boolValue(raw["multiSelect"]) || boolValue(raw["multi_select"]),
+		IsOther:     boolValue(raw["is_other"]),
+		IsSecret:    boolValue(raw["is_secret"]),
 	}
 
 	rawOptions, ok := raw["options"].([]any)

@@ -98,3 +98,66 @@ func TestUserMessageContentRoundTripsMultimodalBlocks(t *testing.T) {
 		t.Fatalf("expected video input block, got %#v", blocks[4])
 	}
 }
+
+func TestUsageDeserializesCachedAndReasoningTokens(t *testing.T) {
+	raw := `{
+		"input_tokens": 100,
+		"output_tokens": 50,
+		"cached_input_tokens": 80,
+		"reasoning_output_tokens": 30
+	}`
+
+	var u Usage
+	if err := json.Unmarshal([]byte(raw), &u); err != nil {
+		t.Fatalf("unmarshal usage: %v", err)
+	}
+	if u.InputTokens != 100 {
+		t.Fatalf("expected InputTokens=100, got %d", u.InputTokens)
+	}
+	if u.OutputTokens != 50 {
+		t.Fatalf("expected OutputTokens=50, got %d", u.OutputTokens)
+	}
+	if u.CachedInputTokens != 80 {
+		t.Fatalf("expected CachedInputTokens=80, got %d", u.CachedInputTokens)
+	}
+	if u.ReasoningOutputTokens != 30 {
+		t.Fatalf("expected ReasoningOutputTokens=30, got %d", u.ReasoningOutputTokens)
+	}
+}
+
+func TestUsageDeserializesWithZeroCachedAndReasoning(t *testing.T) {
+	raw := `{"input_tokens": 100, "output_tokens": 50}`
+
+	var u Usage
+	if err := json.Unmarshal([]byte(raw), &u); err != nil {
+		t.Fatalf("unmarshal usage: %v", err)
+	}
+	if u.CachedInputTokens != 0 {
+		t.Fatalf("expected CachedInputTokens=0, got %d", u.CachedInputTokens)
+	}
+	if u.ReasoningOutputTokens != 0 {
+		t.Fatalf("expected ReasoningOutputTokens=0, got %d", u.ReasoningOutputTokens)
+	}
+}
+
+func TestUsageRoundTrip(t *testing.T) {
+	u := Usage{
+		InputTokens:           200,
+		OutputTokens:          100,
+		CachedInputTokens:     150,
+		ReasoningOutputTokens: 40,
+	}
+
+	data, err := json.Marshal(u)
+	if err != nil {
+		t.Fatalf("marshal usage: %v", err)
+	}
+
+	var u2 Usage
+	if err := json.Unmarshal(data, &u2); err != nil {
+		t.Fatalf("unmarshal usage: %v", err)
+	}
+	if u2 != u {
+		t.Fatalf("round-trip mismatch: got %+v, want %+v", u2, u)
+	}
+}

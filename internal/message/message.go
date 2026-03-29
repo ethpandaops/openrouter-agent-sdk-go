@@ -2,6 +2,7 @@ package message
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -47,7 +48,7 @@ func (a *AuditEnvelope) GetPayload() json.RawMessage {
 func NewAuditEnvelope(eventType, subtype string, payload any) (*AuditEnvelope, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("marshal audit payload: %w", err)
 	}
 
 	return &AuditEnvelope{
@@ -252,6 +253,7 @@ type ResultMessage struct {
 	TotalCostUSD     *float64       `json:"total_cost_usd,omitempty"`
 	Usage            *Usage         `json:"usage,omitempty"`
 	Result           *string        `json:"result,omitempty"`
+	StopReason       *string        `json:"stop_reason,omitempty"`
 	StructuredOutput any            `json:"structured_output,omitempty"`
 	Audit            *AuditEnvelope `json:"-"`
 }
@@ -277,8 +279,10 @@ func (m *StreamEvent) MessageType() string { return "stream_event" }
 //
 //nolint:tagliatelle // Legacy compatibility payloads use snake_case.
 type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens           int `json:"input_tokens"`
+	OutputTokens          int `json:"output_tokens"`
+	CachedInputTokens     int `json:"cached_input_tokens"`
+	ReasoningOutputTokens int `json:"reasoning_output_tokens"`
 }
 
 // StreamingMessageContent represents the content of a streaming message.

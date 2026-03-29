@@ -14,12 +14,13 @@ type QuestionOption struct {
 
 // Question represents a single user-input prompt.
 type Question struct {
-	ID       string           `json:"id"`
-	Header   string           `json:"header,omitempty"`
-	Question string           `json:"question"`
-	IsOther  bool             `json:"is_other,omitempty"`
-	IsSecret bool             `json:"is_secret,omitempty"`
-	Options  []QuestionOption `json:"options,omitempty"`
+	ID          string           `json:"id"`
+	Header      string           `json:"header,omitempty"`
+	Question    string           `json:"question"`
+	MultiSelect bool             `json:"multi_select,omitempty"`
+	IsOther     bool             `json:"is_other,omitempty"`
+	IsSecret    bool             `json:"is_secret,omitempty"`
+	Options     []QuestionOption `json:"options,omitempty"`
 }
 
 // Answer contains the user's response(s) to a single question.

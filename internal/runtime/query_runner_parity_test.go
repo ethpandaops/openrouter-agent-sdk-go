@@ -1648,3 +1648,260 @@ func TestRunMessageIteratorToolFlowRemainsFunctionalWhileInputsArrive(t *testing
 		}
 	}
 }
+
+func TestResultMessageStopReasonSuccess(t *testing.T) {
+	tr := &captureTransport{}
+	opts := &config.Options{
+		Transport: tr,
+		MaxTurns:  1,
+	}
+	r := NewQueryRunner(opts, session.NewManager())
+
+	msgs, errs := r.RunMessages(context.Background(), "default", []message.StreamingMessage{
+		{
+			Type: "user",
+			Message: message.StreamingMessageContent{
+				Role:    "user",
+				Content: message.NewUserMessageContent("hello"),
+			},
+		},
+	})
+
+	var result *message.ResultMessage
+	for msg := range msgs {
+		if rm, ok := msg.(*message.ResultMessage); ok {
+			result = rm
+		}
+	}
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if result == nil {
+		t.Fatalf("expected result message")
+	}
+	if result.StopReason == nil || *result.StopReason != "end_turn" {
+		t.Fatalf("expected stop_reason 'end_turn', got %v", result.StopReason)
+	}
+}
+
+type budgetExceedTransport struct{}
+
+func (t *budgetExceedTransport) Start(context.Context) error { return nil }
+func (t *budgetExceedTransport) Close() error                { return nil }
+func (t *budgetExceedTransport) CreateStream(
+	_ context.Context,
+	_ *config.ChatRequest,
+) (<-chan map[string]any, <-chan error) {
+	out := make(chan map[string]any, 1)
+	errs := make(chan error, 1)
+	out <- map[string]any{
+		"choices": []any{
+			map[string]any{
+				"delta":         map[string]any{"content": "done"},
+				"finish_reason": "stop",
+			},
+		},
+		"total_cost_usd": 999.0,
+	}
+	close(out)
+	close(errs)
+	return out, errs
+}
+
+func TestResultMessageStopReasonMaxBudget(t *testing.T) {
+	budget := 0.001
+	tr := &budgetExceedTransport{}
+	opts := &config.Options{
+		Transport:    tr,
+		MaxTurns:     2,
+		MaxBudgetUSD: &budget,
+	}
+	r := NewQueryRunner(opts, session.NewManager())
+
+	msgs, errs := r.RunMessages(context.Background(), "default", []message.StreamingMessage{
+		{
+			Type: "user",
+			Message: message.StreamingMessageContent{
+				Role:    "user",
+				Content: message.NewUserMessageContent("hello"),
+			},
+		},
+	})
+
+	var result *message.ResultMessage
+	for msg := range msgs {
+		if rm, ok := msg.(*message.ResultMessage); ok {
+			result = rm
+		}
+	}
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if result == nil {
+		t.Fatalf("expected result message")
+	}
+	if result.StopReason == nil || *result.StopReason != "max_budget" {
+		t.Fatalf("expected stop_reason 'max_budget', got %v", result.StopReason)
+	}
+}
+
+func TestParseUsageAndCostExtractsCachedAndReasoningTokens(t *testing.T) {
+	tests := []struct {
+		name             string
+		raw              map[string]any
+		wantCachedIn     int
+		wantReasoningOut int
+	}{
+		{
+			name: "top-level cached_input_tokens and reasoning_output_tokens",
+			raw: map[string]any{
+				"usage": map[string]any{
+					"input_tokens":            100,
+					"output_tokens":           50,
+					"cached_input_tokens":     80,
+					"reasoning_output_tokens": 30,
+				},
+			},
+			wantCachedIn:     80,
+			wantReasoningOut: 30,
+		},
+		{
+			name: "OpenAI nested prompt_tokens_details and completion_tokens_details",
+			raw: map[string]any{
+				"usage": map[string]any{
+					"prompt_tokens":     200,
+					"completion_tokens": 100,
+					"prompt_tokens_details": map[string]any{
+						"cached_tokens": 150,
+					},
+					"completion_tokens_details": map[string]any{
+						"reasoning_tokens": 40,
+					},
+				},
+			},
+			wantCachedIn:     150,
+			wantReasoningOut: 40,
+		},
+		{
+			name: "top-level takes priority over nested when both present",
+			raw: map[string]any{
+				"usage": map[string]any{
+					"input_tokens":            100,
+					"output_tokens":           50,
+					"cached_input_tokens":     80,
+					"reasoning_output_tokens": 30,
+					"prompt_tokens_details": map[string]any{
+						"cached_tokens": 999,
+					},
+					"completion_tokens_details": map[string]any{
+						"reasoning_tokens": 888,
+					},
+				},
+			},
+			wantCachedIn:     80,
+			wantReasoningOut: 30,
+		},
+		{
+			name: "no cached or reasoning tokens",
+			raw: map[string]any{
+				"usage": map[string]any{
+					"input_tokens":  100,
+					"output_tokens": 50,
+				},
+			},
+			wantCachedIn:     0,
+			wantReasoningOut: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			usage, _ := parseUsageAndCost(tt.raw, nil, nil)
+			if usage == nil {
+				t.Fatalf("expected non-nil usage")
+			}
+			if usage.CachedInputTokens != tt.wantCachedIn {
+				t.Fatalf("CachedInputTokens = %d, want %d", usage.CachedInputTokens, tt.wantCachedIn)
+			}
+			if usage.ReasoningOutputTokens != tt.wantReasoningOut {
+				t.Fatalf("ReasoningOutputTokens = %d, want %d", usage.ReasoningOutputTokens, tt.wantReasoningOut)
+			}
+		})
+	}
+}
+
+type usageWithCacheTransport struct{}
+
+func (t *usageWithCacheTransport) Start(context.Context) error { return nil }
+func (t *usageWithCacheTransport) Close() error                { return nil }
+func (t *usageWithCacheTransport) CreateStream(
+	_ context.Context,
+	_ *config.ChatRequest,
+) (<-chan map[string]any, <-chan error) {
+	out := make(chan map[string]any, 2)
+	errs := make(chan error, 1)
+	out <- map[string]any{
+		"choices": []any{
+			map[string]any{
+				"delta":         map[string]any{"content": "response"},
+				"finish_reason": "stop",
+			},
+		},
+		"usage": map[string]any{
+			"input_tokens":            100,
+			"output_tokens":           50,
+			"cached_input_tokens":     75,
+			"reasoning_output_tokens": 20,
+		},
+	}
+	close(out)
+	close(errs)
+	return out, errs
+}
+
+func TestRunMessagesUsageIncludesCachedAndReasoningTokens(t *testing.T) {
+	tr := &usageWithCacheTransport{}
+	opts := &config.Options{
+		Transport: tr,
+		MaxTurns:  1,
+	}
+	r := NewQueryRunner(opts, session.NewManager())
+
+	msgs, errs := r.RunMessages(context.Background(), "default", []message.StreamingMessage{
+		{
+			Type: "user",
+			Message: message.StreamingMessageContent{
+				Role:    "user",
+				Content: message.NewUserMessageContent("hello"),
+			},
+		},
+	})
+
+	var result *message.ResultMessage
+	for msg := range msgs {
+		if rm, ok := msg.(*message.ResultMessage); ok {
+			result = rm
+		}
+	}
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if result == nil {
+		t.Fatalf("expected result message")
+	}
+	if result.Usage == nil {
+		t.Fatalf("expected non-nil usage")
+	}
+	if result.Usage.CachedInputTokens != 75 {
+		t.Fatalf("expected CachedInputTokens=75, got %d", result.Usage.CachedInputTokens)
+	}
+	if result.Usage.ReasoningOutputTokens != 20 {
+		t.Fatalf("expected ReasoningOutputTokens=20, got %d", result.Usage.ReasoningOutputTokens)
+	}
+}

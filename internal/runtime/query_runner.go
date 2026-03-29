@@ -430,6 +430,7 @@ func (r *QueryRunner) RunMessages(
 					TotalCostUSD:  ptrFloat(totalCost),
 					Usage:         turnUsage,
 					Result:        &msg,
+					StopReason:    ptrString("max_budget"),
 				}
 				attachAuditEnvelope(res, "result", res.Subtype, res)
 				select {
@@ -551,6 +552,7 @@ func (r *QueryRunner) RunMessages(
 								IsError:    true,
 								DurationMs: elapsedMs(runStarted),
 								Result:     &msg,
+								StopReason: ptrString("interrupted"),
 							}
 							attachAuditEnvelope(res, "result", res.Subtype, res)
 							select {
@@ -611,6 +613,7 @@ func (r *QueryRunner) RunMessages(
 								IsError:    true,
 								DurationMs: elapsedMs(runStarted),
 								Result:     &msg,
+								StopReason: ptrString("interrupted"),
 							}
 							attachAuditEnvelope(res, "result", res.Subtype, res)
 							select {
@@ -703,6 +706,7 @@ func (r *QueryRunner) RunMessages(
 				TotalCostUSD:     totalCostPtr(totalCost, turnCostSeen),
 				Usage:            turnUsage,
 				Result:           resultText,
+				StopReason:       ptrString("end_turn"),
 				StructuredOutput: structured,
 			}
 			attachAuditEnvelope(result, "result", result.Subtype, result)
@@ -1533,10 +1537,28 @@ func parseUsageAndCost(
 			in = numberFromAny(m["prompt_tokens"])
 			out = numberFromAny(m["completion_tokens"])
 		}
+
+		cachedIn := numberFromAny(m["cached_input_tokens"])
+		reasoningOut := numberFromAny(m["reasoning_output_tokens"])
+
+		// OpenAI-format nested details.
+		if ptd, ok := m["prompt_tokens_details"].(map[string]any); ok {
+			if v := numberFromAny(ptd["cached_tokens"]); v != 0 && cachedIn == 0 {
+				cachedIn = v
+			}
+		}
+		if ctd, ok := m["completion_tokens_details"].(map[string]any); ok {
+			if v := numberFromAny(ctd["reasoning_tokens"]); v != 0 && reasoningOut == 0 {
+				reasoningOut = v
+			}
+		}
+
 		if in != 0 || out != 0 {
 			usage = &message.Usage{
-				InputTokens:  in,
-				OutputTokens: out,
+				InputTokens:           in,
+				OutputTokens:          out,
+				CachedInputTokens:     cachedIn,
+				ReasoningOutputTokens: reasoningOut,
 			}
 		}
 		if v, ok := floatFromAny(m["total_cost_usd"]); ok {
