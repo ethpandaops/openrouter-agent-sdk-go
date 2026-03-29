@@ -2,11 +2,13 @@ package openroutersdk
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/config"
 	internalmcp "github.com/ethpandaops/openrouter-agent-sdk-go/internal/mcp"
+	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/message"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/userinput"
 )
 
@@ -95,6 +97,9 @@ func parseUserInputRequest(input map[string]any) *userinput.Request {
 		ThreadID: stringValue(input["thread_id"]),
 		TurnID:   stringValue(input["turn_id"]),
 	}
+	if payload, err := message.NewAuditEnvelope("sdk_tool", "user_input_request", input); err == nil {
+		req.Audit = payload
+	}
 
 	rawQuestions, ok := input["questions"].([]any)
 	if !ok {
@@ -170,6 +175,14 @@ func serializeUserInputResponse(resp *userinput.Response) map[string]any {
 			continue
 		}
 		answers[key] = append([]string(nil), answer.Answers...)
+	}
+
+	if payload, err := json.Marshal(map[string]any{"answers": answers}); err == nil {
+		resp.Audit = &message.AuditEnvelope{
+			EventType: "sdk_tool",
+			Subtype:   "user_input_response",
+			Payload:   payload,
+		}
 	}
 
 	return map[string]any{"answers": answers}

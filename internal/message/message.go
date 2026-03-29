@@ -11,6 +11,52 @@ type Message interface {
 	MessageType() string
 }
 
+// AuditEnvelope contains the provider-native event metadata and canonical payload
+// captured at the SDK boundary.
+type AuditEnvelope struct {
+	EventType string          `json:"event_type"`
+	Subtype   string          `json:"subtype,omitempty"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+func (a *AuditEnvelope) GetEventType() string {
+	if a == nil {
+		return ""
+	}
+
+	return a.EventType
+}
+
+func (a *AuditEnvelope) GetSubtype() string {
+	if a == nil {
+		return ""
+	}
+
+	return a.Subtype
+}
+
+func (a *AuditEnvelope) GetPayload() json.RawMessage {
+	if a == nil {
+		return nil
+	}
+
+	return a.Payload
+}
+
+// NewAuditEnvelope marshals a canonical payload into an audit envelope.
+func NewAuditEnvelope(eventType, subtype string, payload any) (*AuditEnvelope, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	return &AuditEnvelope{
+		EventType: eventType,
+		Subtype:   subtype,
+		Payload:   data,
+	}, nil
+}
+
 // Compile-time verification that all message types implement Message.
 var (
 	_ Message = (*UserMessage)(nil)
@@ -142,6 +188,7 @@ type UserMessage struct {
 	UUID            *string            `json:"uuid,omitempty"`
 	ParentToolUseID *string            `json:"parent_tool_use_id,omitempty"`
 	ToolUseResult   map[string]any     `json:"tool_use_result,omitempty"`
+	Audit           *AuditEnvelope     `json:"-"`
 }
 
 // MessageType implements the Message interface.
@@ -156,6 +203,7 @@ type AssistantMessage struct {
 	Model           string                 `json:"model"`
 	ParentToolUseID *string                `json:"parent_tool_use_id,omitempty"`
 	Error           *AssistantMessageError `json:"error,omitempty"`
+	Audit           *AuditEnvelope         `json:"-"`
 }
 
 // MessageType implements the Message interface.
@@ -184,6 +232,7 @@ type SystemMessage struct {
 	Type    string         `json:"type"`
 	Subtype string         `json:"subtype,omitempty"`
 	Data    map[string]any `json:"data,omitempty"`
+	Audit   *AuditEnvelope `json:"-"`
 }
 
 // MessageType implements the Message interface.
@@ -193,17 +242,18 @@ func (m *SystemMessage) MessageType() string { return "system" }
 //
 //nolint:tagliatelle // Legacy compatibility payloads use snake_case.
 type ResultMessage struct {
-	Type             string   `json:"type"`
-	Subtype          string   `json:"subtype"`
-	DurationMs       int      `json:"duration_ms"`
-	DurationAPIMs    int      `json:"duration_api_ms"`
-	IsError          bool     `json:"is_error"`
-	NumTurns         int      `json:"num_turns"`
-	SessionID        string   `json:"session_id"`
-	TotalCostUSD     *float64 `json:"total_cost_usd,omitempty"`
-	Usage            *Usage   `json:"usage,omitempty"`
-	Result           *string  `json:"result,omitempty"`
-	StructuredOutput any      `json:"structured_output,omitempty"`
+	Type             string         `json:"type"`
+	Subtype          string         `json:"subtype"`
+	DurationMs       int            `json:"duration_ms"`
+	DurationAPIMs    int            `json:"duration_api_ms"`
+	IsError          bool           `json:"is_error"`
+	NumTurns         int            `json:"num_turns"`
+	SessionID        string         `json:"session_id"`
+	TotalCostUSD     *float64       `json:"total_cost_usd,omitempty"`
+	Usage            *Usage         `json:"usage,omitempty"`
+	Result           *string        `json:"result,omitempty"`
+	StructuredOutput any            `json:"structured_output,omitempty"`
+	Audit            *AuditEnvelope `json:"-"`
 }
 
 // MessageType implements the Message interface.
@@ -217,6 +267,7 @@ type StreamEvent struct {
 	SessionID       string         `json:"session_id"`
 	Event           map[string]any `json:"event"` // Raw Anthropic API event
 	ParentToolUseID *string        `json:"parent_tool_use_id,omitempty"`
+	Audit           *AuditEnvelope `json:"-"`
 }
 
 // MessageType implements the Message interface.

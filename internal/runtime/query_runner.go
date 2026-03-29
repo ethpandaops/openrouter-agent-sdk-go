@@ -26,6 +26,26 @@ type pendingToolCall struct {
 	Args strings.Builder
 }
 
+func attachAuditEnvelope(msg message.Message, eventType, subtype string, payload any) {
+	audit, err := message.NewAuditEnvelope(eventType, subtype, payload)
+	if err != nil {
+		return
+	}
+
+	switch typed := msg.(type) {
+	case *message.UserMessage:
+		typed.Audit = audit
+	case *message.AssistantMessage:
+		typed.Audit = audit
+	case *message.SystemMessage:
+		typed.Audit = audit
+	case *message.ResultMessage:
+		typed.Audit = audit
+	case *message.StreamEvent:
+		typed.Audit = audit
+	}
+}
+
 // QueryRunner executes prompt/query flows over OpenRouter transport.
 type QueryRunner struct {
 	opts      *config.Options
@@ -229,6 +249,11 @@ func (r *QueryRunner) RunMessages(
 						"prompt": sys,
 					},
 				}
+				attachAuditEnvelope(systemMsg, "system", "init", map[string]any{
+					"type":    "system",
+					"subtype": "init",
+					"data":    systemMsg.Data,
+				})
 				select {
 				case out <- systemMsg:
 				case <-ctx.Done():
@@ -258,6 +283,7 @@ func (r *QueryRunner) RunMessages(
 				Content: in.Message.Content,
 				UUID:    &userID,
 			}
+			attachAuditEnvelope(um, "user", "", um)
 			select {
 			case out <- um:
 			case <-ctx.Done():
@@ -405,6 +431,7 @@ func (r *QueryRunner) RunMessages(
 					Usage:         turnUsage,
 					Result:        &msg,
 				}
+				attachAuditEnvelope(res, "result", res.Subtype, res)
 				select {
 				case out <- res:
 				case <-ctx.Done():
@@ -431,6 +458,7 @@ func (r *QueryRunner) RunMessages(
 						Model:   reqModel,
 						Content: assistantBlocks,
 					}
+					attachAuditEnvelope(am, "assistant", "final_text", am)
 					select {
 					case out <- am:
 					case <-ctx.Done():
@@ -462,6 +490,7 @@ func (r *QueryRunner) RunMessages(
 							},
 						},
 					}
+					attachAuditEnvelope(assistantToolMsg, "assistant", "tool_use", assistantToolMsg)
 					select {
 					case out <- assistantToolMsg:
 					case <-ctx.Done():
@@ -523,6 +552,7 @@ func (r *QueryRunner) RunMessages(
 								DurationMs: elapsedMs(runStarted),
 								Result:     &msg,
 							}
+							attachAuditEnvelope(res, "result", res.Subtype, res)
 							select {
 							case out <- res:
 							case <-ctx.Done():
@@ -582,6 +612,7 @@ func (r *QueryRunner) RunMessages(
 								DurationMs: elapsedMs(runStarted),
 								Result:     &msg,
 							}
+							attachAuditEnvelope(res, "result", res.Subtype, res)
 							select {
 							case out <- res:
 							case <-ctx.Done():
@@ -623,6 +654,7 @@ func (r *QueryRunner) RunMessages(
 							},
 						},
 					}
+					attachAuditEnvelope(toolResMsg, "assistant", "tool_result", toolResMsg)
 					select {
 					case out <- toolResMsg:
 					case <-ctx.Done():
@@ -673,6 +705,7 @@ func (r *QueryRunner) RunMessages(
 				Result:           resultText,
 				StructuredOutput: structured,
 			}
+			attachAuditEnvelope(result, "result", result.Subtype, result)
 			select {
 			case out <- result:
 			case <-ctx.Done():
@@ -1243,6 +1276,11 @@ func (r *QueryRunner) runStream(
 
 	processEvent := func(ev map[string]any) (bool, error) {
 		se := &message.StreamEvent{UUID: "", SessionID: sessionID, Event: ev}
+		attachAuditEnvelope(se, "stream_event", "", map[string]any{
+			"type":       "stream_event",
+			"session_id": sessionID,
+			"event":      ev,
+		})
 		select {
 		case out <- se:
 			emitted = true
@@ -1274,6 +1312,7 @@ func (r *QueryRunner) runStream(
 							&message.TextBlock{Type: message.BlockTypeText, Text: content},
 						},
 					}
+					attachAuditEnvelope(am, "assistant", "partial_text", am)
 					select {
 					case out <- am:
 						emitted = true
@@ -1297,6 +1336,7 @@ func (r *QueryRunner) runStream(
 							Model:   req.Model,
 							Content: blocks,
 						}
+						attachAuditEnvelope(am, "assistant", "partial_image", am)
 						select {
 						case out <- am:
 							emitted = true

@@ -1,6 +1,10 @@
 package userinput
 
-import "context"
+import (
+	"context"
+
+	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/message"
+)
 
 // QuestionOption represents a selectable choice in a user-input question.
 type QuestionOption struct {
@@ -25,15 +29,17 @@ type Answer struct {
 
 // Request contains parsed user-input payload data.
 type Request struct {
-	ItemID    string     `json:"item_id,omitempty"`
-	ThreadID  string     `json:"thread_id,omitempty"`
-	TurnID    string     `json:"turn_id,omitempty"`
-	Questions []Question `json:"questions"`
+	ItemID    string                 `json:"item_id,omitempty"`
+	ThreadID  string                 `json:"thread_id,omitempty"`
+	TurnID    string                 `json:"turn_id,omitempty"`
+	Questions []Question             `json:"questions"`
+	Audit     *message.AuditEnvelope `json:"-"`
 }
 
 // Response contains answers keyed by question ID.
 type Response struct {
-	Answers map[string]*Answer `json:"answers"`
+	Answers map[string]*Answer     `json:"answers"`
+	Audit   *message.AuditEnvelope `json:"-"`
 }
 
 // Callback handles user-input requests and returns answers.
