@@ -46,6 +46,16 @@ func attachAuditEnvelope(msg message.Message, eventType, subtype string, payload
 	}
 }
 
+func attachRawAuditEnvelope(
+	msg message.Message, eventType, subtype string, payload map[string]any,
+) {
+	if len(payload) == 0 {
+		return
+	}
+
+	attachAuditEnvelope(msg, eventType, subtype, payload)
+}
+
 // QueryRunner executes prompt/query flows over OpenRouter transport.
 type QueryRunner struct {
 	opts      *config.Options
@@ -343,6 +353,7 @@ func (r *QueryRunner) RunMessages(
 			assistantImages := []message.ImageBlock{}
 			var turnUsage *message.Usage
 			var turnCost *float64
+			var terminalEvent map[string]any
 			var runErr error
 			turnTotalCost := 0.0
 			turnCostSeen := false
@@ -394,7 +405,7 @@ func (r *QueryRunner) RunMessages(
 					Extra:              requestExtra(r.opts),
 				}
 				var emitted bool
-				assistantTextStr, assistantImages, calls, _, turnUsage, turnCost, runErr, emitted = r.runStream(ctx, sessionID, req, out, errs)
+				assistantTextStr, assistantImages, calls, _, turnUsage, turnCost, terminalEvent, runErr, emitted = r.runStream(ctx, sessionID, req, out, errs)
 				if turnCost != nil {
 					turnTotalCost += *turnCost
 					turnCostSeen = true
@@ -432,7 +443,15 @@ func (r *QueryRunner) RunMessages(
 					Result:        &msg,
 					StopReason:    ptrString("max_budget"),
 				}
-				attachAuditEnvelope(res, "result", res.Subtype, res)
+				if terminalEvent != nil {
+					attachRawAuditEnvelope(
+						res, "result", res.Subtype, terminalEvent,
+					)
+				} else {
+					attachAuditEnvelope(
+						res, "result", res.Subtype, res,
+					)
+				}
 				select {
 				case out <- res:
 				case <-ctx.Done():
@@ -709,7 +728,15 @@ func (r *QueryRunner) RunMessages(
 				StopReason:       ptrString("end_turn"),
 				StructuredOutput: structured,
 			}
-			attachAuditEnvelope(result, "result", result.Subtype, result)
+			if terminalEvent != nil {
+				attachRawAuditEnvelope(
+					result, "result", result.Subtype, terminalEvent,
+				)
+			} else {
+				attachAuditEnvelope(
+					result, "result", result.Subtype, result,
+				)
+			}
 			select {
 			case out <- result:
 			case <-ctx.Done():
@@ -1267,7 +1294,7 @@ func (r *QueryRunner) runStream(
 	req *config.ChatRequest,
 	out chan<- message.Message,
 	errs chan<- error,
-) (string, []message.ImageBlock, map[int]*pendingToolCall, string, *message.Usage, *float64, error, bool) {
+) (string, []message.ImageBlock, map[int]*pendingToolCall, string, *message.Usage, *float64, map[string]any, error, bool) {
 	stream, streamErrs := r.transport.CreateStream(ctx, req)
 
 	var assistantText strings.Builder
@@ -1276,15 +1303,12 @@ func (r *QueryRunner) runStream(
 	finishReason := ""
 	var usage *message.Usage
 	var totalCost *float64
+	var terminalEvent map[string]any
 	emitted := false
 
 	processEvent := func(ev map[string]any) (bool, error) {
 		se := &message.StreamEvent{UUID: "", SessionID: sessionID, Event: ev}
-		attachAuditEnvelope(se, "stream_event", "", map[string]any{
-			"type":       "stream_event",
-			"session_id": sessionID,
-			"event":      ev,
-		})
+		attachRawAuditEnvelope(se, "stream_event", "", ev)
 		select {
 		case out <- se:
 			emitted = true
@@ -1368,6 +1392,7 @@ func (r *QueryRunner) runStream(
 			}
 			if ch.Finish != "" {
 				finishReason = ch.Finish
+				terminalEvent = ev
 			}
 		}
 		return true, nil
@@ -1387,7 +1412,7 @@ func (r *QueryRunner) runStream(
 				}
 				handled, err := processEvent(ev)
 				if err != nil {
-					return "", nil, nil, "", usage, totalCost, err, emitted
+					return "", nil, nil, "", usage, totalCost, terminalEvent, err, emitted
 				}
 				if handled {
 					continue
@@ -1403,7 +1428,7 @@ func (r *QueryRunner) runStream(
 				continue
 			}
 			if _, err := processEvent(ev); err != nil {
-				return "", nil, nil, "", usage, totalCost, err, emitted
+				return "", nil, nil, "", usage, totalCost, terminalEvent, err, emitted
 			}
 		case err, ok := <-errCh:
 			if !ok {
@@ -1411,14 +1436,14 @@ func (r *QueryRunner) runStream(
 				continue
 			}
 			if err != nil {
-				return "", nil, nil, "", usage, totalCost, err, emitted
+				return "", nil, nil, "", usage, totalCost, terminalEvent, err, emitted
 			}
 		case <-ctx.Done():
-			return "", nil, nil, "", usage, totalCost, ctx.Err(), emitted
+			return "", nil, nil, "", usage, totalCost, terminalEvent, ctx.Err(), emitted
 		}
 	}
 
-	return strings.TrimSpace(assistantText.String()), assistantImages, calls, finishReason, usage, totalCost, nil, emitted
+	return strings.TrimSpace(assistantText.String()), assistantImages, calls, finishReason, usage, totalCost, terminalEvent, nil, emitted
 }
 
 type permissionDecision struct {

@@ -6,6 +6,8 @@ import (
 	"strings"
 )
 
+const rawJSONKey = "\x00sdk_raw_json"
+
 // Message represents any message in the conversation.
 // Use type assertion or type switch to determine the concrete type.
 type Message interface {
@@ -44,9 +46,90 @@ func (a *AuditEnvelope) GetPayload() json.RawMessage {
 	return a.Payload
 }
 
+// AnnotateRawJSON attaches the original raw JSON bytes to a decoded payload so
+// audit envelopes can preserve byte fidelity later in the pipeline.
+func AnnotateRawJSON(data map[string]any, raw []byte) map[string]any {
+	if data == nil || len(raw) == 0 {
+		return data
+	}
+
+	data[rawJSONKey] = append([]byte(nil), raw...)
+
+	return data
+}
+
+func extractRawJSON(data map[string]any) (json.RawMessage, bool) {
+	if data == nil {
+		return nil, false
+	}
+
+	switch raw := data[rawJSONKey].(type) {
+	case []byte:
+		if len(raw) == 0 {
+			return nil, false
+		}
+
+		return append(json.RawMessage(nil), raw...), true
+	case json.RawMessage:
+		if len(raw) == 0 {
+			return nil, false
+		}
+
+		return append(json.RawMessage(nil), raw...), true
+	case string:
+		if raw == "" {
+			return nil, false
+		}
+
+		return json.RawMessage(raw), true
+	default:
+		return nil, false
+	}
+}
+
+func stripRawJSON(data map[string]any) map[string]any {
+	if data == nil {
+		return nil
+	}
+
+	if _, ok := data[rawJSONKey]; !ok {
+		return data
+	}
+
+	sanitized := make(map[string]any, len(data)-1)
+	for key, value := range data {
+		if key == rawJSONKey {
+			continue
+		}
+
+		sanitized[key] = value
+	}
+
+	return sanitized
+}
+
 // NewAuditEnvelope marshals a canonical payload into an audit envelope.
 func NewAuditEnvelope(eventType, subtype string, payload any) (*AuditEnvelope, error) {
-	data, err := json.Marshal(payload)
+	var (
+		data json.RawMessage
+		err  error
+	)
+
+	switch typed := payload.(type) {
+	case map[string]any:
+		if raw, ok := extractRawJSON(typed); ok {
+			data = raw
+			break
+		}
+
+		data, err = json.Marshal(stripRawJSON(typed))
+	case []byte:
+		data = append(json.RawMessage(nil), typed...)
+	case json.RawMessage:
+		data = append(json.RawMessage(nil), typed...)
+	default:
+		data, err = json.Marshal(payload)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("marshal audit payload: %w", err)
 	}

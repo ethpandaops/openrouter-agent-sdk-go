@@ -103,6 +103,21 @@ func TestNewAuditEnvelope_RoundTrip(t *testing.T) {
 	assert.Equal(t, "val", p["key"])
 }
 
+func TestAttachRawAuditEnvelope_PreservesOriginalJSONBytes(t *testing.T) {
+	raw := []byte("{\n  \"provider_trace\": 1e+06,\n  \"provider_trace\": 1000000,\n  \"choices\": []\n}")
+
+	var payload map[string]any
+	err := json.Unmarshal(raw, &payload)
+	require.NoError(t, err)
+	payload = message.AnnotateRawJSON(payload, raw)
+
+	rm := &message.ResultMessage{Type: "result", Subtype: "success"}
+	attachRawAuditEnvelope(rm, "response", "", payload)
+
+	require.NotNil(t, rm.Audit)
+	assert.Equal(t, string(raw), string(rm.Audit.Payload))
+}
+
 func TestNewAuditEnvelope_MarshalError(t *testing.T) {
 	env, err := message.NewAuditEnvelope("event", "sub", make(chan int))
 	assert.Error(t, err)

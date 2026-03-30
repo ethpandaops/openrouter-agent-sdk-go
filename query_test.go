@@ -158,6 +158,56 @@ func TestQuery_WithOnUserInputHandlesPromptTool(t *testing.T) {
 	}
 }
 
+func TestQuery_ResultAuditPreservesRawTransportFields(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	tr := &scriptedTransport{
+		t: t,
+		scripts: []func(*ChatRequest) ([]map[string]any, error){
+			func(*ChatRequest) ([]map[string]any, error) {
+				return []map[string]any{
+					{
+						"provider_trace": "keep-me",
+						"choices": []any{
+							map[string]any{
+								"delta":         map[string]any{"content": "hello"},
+								"finish_reason": "stop",
+							},
+						},
+					},
+				}, nil
+			},
+		},
+	}
+
+	var gotResult *ResultMessage
+	for msg, err := range Query(ctx, Text("hello"),
+		WithTransport(tr),
+		WithMaxTurns(1),
+	) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if result, ok := msg.(*ResultMessage); ok {
+			gotResult = result
+		}
+	}
+
+	if gotResult == nil {
+		t.Fatal("expected result message")
+	}
+
+	if gotResult.Audit == nil {
+		t.Fatal("expected audit envelope on result message")
+	}
+
+	if !strings.Contains(string(gotResult.Audit.Payload), `"provider_trace":"keep-me"`) {
+		t.Fatalf("expected raw provider field to survive in result audit payload, got %s", string(gotResult.Audit.Payload))
+	}
+}
+
 func TestQuery_OnUserInputConflictYieldsError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
