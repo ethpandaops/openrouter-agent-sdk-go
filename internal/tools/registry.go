@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -105,8 +106,10 @@ func NewRegistry(opts *config.Options) *Registry {
 				status.Status = "error"
 				status.Reason = err.Error()
 				r.serverStatus[serverName] = status
+				fmt.Printf("DEBUG registry: externalListTools failed for %q: %v\n", serverName, err)
 				continue
 			}
+			fmt.Printf("DEBUG registry: externalListTools OK for %q: %d tools discovered\n", serverName, len(tools))
 			status.Status = "ready"
 			r.serverStatus[serverName] = status
 			for _, t := range tools {
@@ -145,6 +148,11 @@ func NewRegistry(opts *config.Options) *Registry {
 			r.serverStatus[serverName] = status
 		}
 	}
+	registeredNames := make([]string, 0, len(r.byName))
+	for n := range r.byName {
+		registeredNames = append(registeredNames, n)
+	}
+	fmt.Printf("DEBUG registry: final registered tools (%d): %v\n", len(r.byName), registeredNames)
 	return r
 }
 

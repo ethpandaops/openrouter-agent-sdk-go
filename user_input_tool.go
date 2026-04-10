@@ -48,8 +48,11 @@ func ensureUserInputTool(cfg *config.Options) {
 		cfg.MCPServers["sdk"] = createSDKToolServer([]Tool{tool})
 	}
 
+	// Only add to AllowedTools if the user already configured an
+	// allowlist. Adding to an empty list would activate the allowlist
+	// filter and block all other MCP tools (e.g. external HTTP servers).
 	publicName := "mcp__sdk__" + toolName
-	if !containsString(cfg.AllowedTools, publicName) {
+	if len(cfg.AllowedTools) > 0 && !containsString(cfg.AllowedTools, publicName) {
 		cfg.AllowedTools = append(cfg.AllowedTools, publicName)
 	}
 }

@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"sync"
 
-	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/config"
 	sdkerrors "github.com/ethpandaops/openrouter-agent-sdk-go/internal/errors"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/mcp"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/permission"
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Executor executes tools from the registry.
@@ -68,6 +68,15 @@ func (e *Executor) ExecuteWithSuggestions(
 ) (string, error) {
 	ref, ok := e.reg.Get(name)
 	if !ok {
+		regNames := make([]string, 0, 8)
+		if e.reg != nil {
+			for _, t := range e.reg.OpenAITools() {
+				if fn, ok2 := t["function"].(map[string]any); ok2 {
+					regNames = append(regNames, fmt.Sprintf("%v", fn["name"]))
+				}
+			}
+		}
+		fmt.Printf("DEBUG executor: tool not found %q, registry has %d tools: %v\n", name, len(regNames), regNames)
 		return "", fmt.Errorf("tool not found: %s", name)
 	}
 
