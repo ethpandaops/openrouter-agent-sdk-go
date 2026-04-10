@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -142,5 +143,76 @@ func TestModelInfoToModelUsesDerivedFlags(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected model projection: %#v", got)
+	}
+}
+
+func TestListModelsResponseUsesAuthenticatedEndpointAndFallback(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+
+		switch r.URL.Path {
+		case "/api/v1/models/user":
+			if r.Header.Get("Authorization") == "" {
+				http.Error(w, "missing auth", http.StatusUnauthorized)
+				return
+			}
+			writeModelResponse(t, w, []map[string]any{
+				{
+					"id":                   "openai/gpt-4o-mini",
+					"name":                 "GPT-4o mini",
+					"description":          "Fast model",
+					"context_length":       128000,
+					"pricing":              map[string]any{"prompt": "0", "completion": "0"},
+					"supported_parameters": []string{"tools", "reasoning"},
+				},
+			})
+		case "/api/v1/models":
+			writeModelResponse(t, w, []map[string]any{
+				{
+					"id":             "meta-llama/llama-3.1-8b-instruct",
+					"name":           "Llama 3.1 8B",
+					"description":    "Fallback model",
+					"context_length": 8192,
+					"pricing":        map[string]any{"prompt": "0.000001", "completion": "0.000002"},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := ListModelsResponse(ctx, WithBaseURL(server.URL+"/api/v1"), WithAPIKey("test-key"))
+	if err != nil {
+		t.Fatalf("list models response: %v", err)
+	}
+	if !resp.Authenticated || resp.Endpoint != "models/user" || len(resp.Models) != 1 {
+		t.Fatalf("unexpected authenticated response: %+v", resp)
+	}
+	if !resp.Models[0].SupportsToolCalling() || resp.Models[0].CostTier() != "free" {
+		t.Fatalf("unexpected model helpers: %+v", resp.Models[0])
+	}
+
+	t.Setenv("OPENROUTER_API_KEY", "")
+	resp, err = ListModelsResponse(ctx, WithBaseURL(server.URL+"/api/v1"))
+	if err != nil {
+		t.Fatalf("list fallback models response: %v", err)
+	}
+	if resp.Authenticated || resp.Endpoint != "models" || len(resp.Models) != 1 {
+		t.Fatalf("unexpected fallback response: %+v", resp)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(paths) < 2 || paths[0] != "/api/v1/models/user" || paths[len(paths)-1] != "/api/v1/models" {
+		t.Fatalf("unexpected requested paths: %#v", paths)
 	}
 }

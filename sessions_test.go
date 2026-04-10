@@ -157,3 +157,63 @@ func TestGetSessionMessages_PreservesAssistantImages(t *testing.T) {
 		t.Fatalf("expected persisted image message, got %#v", msgs)
 	}
 }
+
+func TestSessionMetadataAPIsUseLocalStore(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	store := t.TempDir() + "/sessions.json"
+	tr := &scriptedTransport{
+		t: t,
+		scripts: []func(*ChatRequest) ([]map[string]any, error){
+			func(*ChatRequest) ([]map[string]any, error) {
+				return []map[string]any{
+					{
+						"choices": []any{
+							map[string]any{
+								"delta":         map[string]any{"content": "stored"},
+								"finish_reason": "stop",
+							},
+						},
+					},
+				}, nil
+			},
+		},
+	}
+
+	for _, err := range Query(ctx, Text("persist this session"), WithTransport(tr), WithSessionStorePath(store), WithMaxTurns(1)) {
+		if err != nil {
+			t.Fatalf("unexpected query error: %v", err)
+		}
+	}
+
+	stat, err := StatSession(ctx, "default", WithSessionStorePath(store))
+	if err != nil {
+		t.Fatalf("stat session: %v", err)
+	}
+	if stat.SessionID != "default" || stat.MessageCount != 2 || stat.UserTurns != 1 {
+		t.Fatalf("unexpected session stat: %+v", stat)
+	}
+
+	sessions, err := ListSessions(ctx, WithSessionStorePath(store))
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].SessionID != "default" {
+		t.Fatalf("unexpected sessions: %+v", sessions)
+	}
+
+	messages, err := GetSessionMessages(ctx, "default", WithSessionStorePath(store))
+	if err != nil {
+		t.Fatalf("get session messages: %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 persisted messages, got %d", len(messages))
+	}
+	if _, ok := messages[0].(*UserMessage); !ok {
+		t.Fatalf("expected first message to be user, got %T", messages[0])
+	}
+	if _, ok := messages[1].(*AssistantMessage); !ok {
+		t.Fatalf("expected second message to be assistant, got %T", messages[1])
+	}
+}

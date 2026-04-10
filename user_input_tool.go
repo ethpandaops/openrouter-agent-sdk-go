@@ -2,11 +2,13 @@ package openroutersdk
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/config"
 	internalmcp "github.com/ethpandaops/openrouter-agent-sdk-go/internal/mcp"
+	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/message"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/userinput"
 )
 
@@ -46,8 +48,11 @@ func ensureUserInputTool(cfg *config.Options) {
 		cfg.MCPServers["sdk"] = createSDKToolServer([]Tool{tool})
 	}
 
+	// Only add to AllowedTools if the user already configured an
+	// allowlist. Adding to an empty list would activate the allowlist
+	// filter and block all other MCP tools (e.g. external HTTP servers).
 	publicName := "mcp__sdk__" + toolName
-	if !containsString(cfg.AllowedTools, publicName) {
+	if len(cfg.AllowedTools) > 0 && !containsString(cfg.AllowedTools, publicName) {
 		cfg.AllowedTools = append(cfg.AllowedTools, publicName)
 	}
 }
@@ -64,11 +69,13 @@ func userInputToolSchema() map[string]any {
 				"items": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"id":        map[string]any{"type": "string"},
-						"header":    map[string]any{"type": "string"},
-						"question":  map[string]any{"type": "string"},
-						"is_other":  map[string]any{"type": "boolean"},
-						"is_secret": map[string]any{"type": "boolean"},
+						"id":           map[string]any{"type": "string"},
+						"header":       map[string]any{"type": "string"},
+						"question":     map[string]any{"type": "string"},
+						"multiSelect":  map[string]any{"type": "boolean"},
+						"multi_select": map[string]any{"type": "boolean"},
+						"is_other":     map[string]any{"type": "boolean"},
+						"is_secret":    map[string]any{"type": "boolean"},
 						"options": map[string]any{
 							"type": "array",
 							"items": map[string]any{
@@ -94,6 +101,9 @@ func parseUserInputRequest(input map[string]any) *userinput.Request {
 		ItemID:   stringValue(input["item_id"]),
 		ThreadID: stringValue(input["thread_id"]),
 		TurnID:   stringValue(input["turn_id"]),
+	}
+	if payload, err := message.NewAuditEnvelope("sdk_tool", "user_input_request", input); err == nil {
+		req.Audit = payload
 	}
 
 	rawQuestions, ok := input["questions"].([]any)
@@ -129,11 +139,12 @@ func parseUserInputQuestion(raw map[string]any, index int) *userinput.Question {
 	}
 
 	out := &userinput.Question{
-		ID:       id,
-		Header:   stringValue(raw["header"]),
-		Question: question,
-		IsOther:  boolValue(raw["is_other"]),
-		IsSecret: boolValue(raw["is_secret"]),
+		ID:          id,
+		Header:      stringValue(raw["header"]),
+		Question:    question,
+		MultiSelect: boolValue(raw["multiSelect"]) || boolValue(raw["multi_select"]),
+		IsOther:     boolValue(raw["is_other"]),
+		IsSecret:    boolValue(raw["is_secret"]),
 	}
 
 	rawOptions, ok := raw["options"].([]any)
@@ -170,6 +181,14 @@ func serializeUserInputResponse(resp *userinput.Response) map[string]any {
 			continue
 		}
 		answers[key] = append([]string(nil), answer.Answers...)
+	}
+
+	if payload, err := json.Marshal(map[string]any{"answers": answers}); err == nil {
+		resp.Audit = &message.AuditEnvelope{
+			EventType: "sdk_tool",
+			Subtype:   "user_input_response",
+			Payload:   payload,
+		}
 	}
 
 	return map[string]any{"answers": answers}

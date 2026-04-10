@@ -1,0 +1,4 @@
+[default.extend-words]
+# prompt_tokens_details / completion_tokens_details abbreviations
+ptd = "ptd"
+ctd = "ctd"

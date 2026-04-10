@@ -26,6 +26,36 @@ type pendingToolCall struct {
 	Args strings.Builder
 }
 
+func attachAuditEnvelope(msg message.Message, eventType, subtype string, payload any) {
+	audit, err := message.NewAuditEnvelope(eventType, subtype, payload)
+	if err != nil {
+		return
+	}
+
+	switch typed := msg.(type) {
+	case *message.UserMessage:
+		typed.Audit = audit
+	case *message.AssistantMessage:
+		typed.Audit = audit
+	case *message.SystemMessage:
+		typed.Audit = audit
+	case *message.ResultMessage:
+		typed.Audit = audit
+	case *message.StreamEvent:
+		typed.Audit = audit
+	}
+}
+
+func attachRawAuditEnvelope(
+	msg message.Message, eventType, subtype string, payload map[string]any,
+) {
+	if len(payload) == 0 {
+		return
+	}
+
+	attachAuditEnvelope(msg, eventType, subtype, payload)
+}
+
 // QueryRunner executes prompt/query flows over OpenRouter transport.
 type QueryRunner struct {
 	opts      *config.Options
@@ -229,6 +259,11 @@ func (r *QueryRunner) RunMessages(
 						"prompt": sys,
 					},
 				}
+				attachAuditEnvelope(systemMsg, "system", "init", map[string]any{
+					"type":    "system",
+					"subtype": "init",
+					"data":    systemMsg.Data,
+				})
 				select {
 				case out <- systemMsg:
 				case <-ctx.Done():
@@ -258,6 +293,7 @@ func (r *QueryRunner) RunMessages(
 				Content: in.Message.Content,
 				UUID:    &userID,
 			}
+			attachAuditEnvelope(um, "user", "", um)
 			select {
 			case out <- um:
 			case <-ctx.Done():
@@ -317,6 +353,7 @@ func (r *QueryRunner) RunMessages(
 			assistantImages := []message.ImageBlock{}
 			var turnUsage *message.Usage
 			var turnCost *float64
+			var terminalEvent map[string]any
 			var runErr error
 			turnTotalCost := 0.0
 			turnCostSeen := false
@@ -368,7 +405,7 @@ func (r *QueryRunner) RunMessages(
 					Extra:              requestExtra(r.opts),
 				}
 				var emitted bool
-				assistantTextStr, assistantImages, calls, _, turnUsage, turnCost, runErr, emitted = r.runStream(ctx, sessionID, req, out, errs)
+				assistantTextStr, assistantImages, calls, _, turnUsage, turnCost, terminalEvent, runErr, emitted = r.runStream(ctx, sessionID, req, out, errs)
 				if turnCost != nil {
 					turnTotalCost += *turnCost
 					turnCostSeen = true
@@ -404,6 +441,16 @@ func (r *QueryRunner) RunMessages(
 					TotalCostUSD:  ptrFloat(totalCost),
 					Usage:         turnUsage,
 					Result:        &msg,
+					StopReason:    ptrString("max_budget"),
+				}
+				if terminalEvent != nil {
+					attachRawAuditEnvelope(
+						res, "result", res.Subtype, terminalEvent,
+					)
+				} else {
+					attachAuditEnvelope(
+						res, "result", res.Subtype, res,
+					)
 				}
 				select {
 				case out <- res:
@@ -431,6 +478,7 @@ func (r *QueryRunner) RunMessages(
 						Model:   reqModel,
 						Content: assistantBlocks,
 					}
+					attachAuditEnvelope(am, "assistant", "final_text", am)
 					select {
 					case out <- am:
 					case <-ctx.Done():
@@ -462,6 +510,7 @@ func (r *QueryRunner) RunMessages(
 							},
 						},
 					}
+					attachAuditEnvelope(assistantToolMsg, "assistant", "tool_use", assistantToolMsg)
 					select {
 					case out <- assistantToolMsg:
 					case <-ctx.Done():
@@ -522,7 +571,9 @@ func (r *QueryRunner) RunMessages(
 								IsError:    true,
 								DurationMs: elapsedMs(runStarted),
 								Result:     &msg,
+								StopReason: ptrString("interrupted"),
 							}
+							attachAuditEnvelope(res, "result", res.Subtype, res)
 							select {
 							case out <- res:
 							case <-ctx.Done():
@@ -581,7 +632,9 @@ func (r *QueryRunner) RunMessages(
 								IsError:    true,
 								DurationMs: elapsedMs(runStarted),
 								Result:     &msg,
+								StopReason: ptrString("interrupted"),
 							}
+							attachAuditEnvelope(res, "result", res.Subtype, res)
 							select {
 							case out <- res:
 							case <-ctx.Done():
@@ -623,6 +676,7 @@ func (r *QueryRunner) RunMessages(
 							},
 						},
 					}
+					attachAuditEnvelope(toolResMsg, "assistant", "tool_result", toolResMsg)
 					select {
 					case out <- toolResMsg:
 					case <-ctx.Done():
@@ -671,7 +725,17 @@ func (r *QueryRunner) RunMessages(
 				TotalCostUSD:     totalCostPtr(totalCost, turnCostSeen),
 				Usage:            turnUsage,
 				Result:           resultText,
+				StopReason:       ptrString("end_turn"),
 				StructuredOutput: structured,
+			}
+			if terminalEvent != nil {
+				attachRawAuditEnvelope(
+					result, "result", result.Subtype, terminalEvent,
+				)
+			} else {
+				attachAuditEnvelope(
+					result, "result", result.Subtype, result,
+				)
 			}
 			select {
 			case out <- result:
@@ -1230,7 +1294,7 @@ func (r *QueryRunner) runStream(
 	req *config.ChatRequest,
 	out chan<- message.Message,
 	errs chan<- error,
-) (string, []message.ImageBlock, map[int]*pendingToolCall, string, *message.Usage, *float64, error, bool) {
+) (string, []message.ImageBlock, map[int]*pendingToolCall, string, *message.Usage, *float64, map[string]any, error, bool) {
 	stream, streamErrs := r.transport.CreateStream(ctx, req)
 
 	var assistantText strings.Builder
@@ -1239,10 +1303,12 @@ func (r *QueryRunner) runStream(
 	finishReason := ""
 	var usage *message.Usage
 	var totalCost *float64
+	var terminalEvent map[string]any
 	emitted := false
 
 	processEvent := func(ev map[string]any) (bool, error) {
 		se := &message.StreamEvent{UUID: "", SessionID: sessionID, Event: ev}
+		attachRawAuditEnvelope(se, "stream_event", "", ev)
 		select {
 		case out <- se:
 			emitted = true
@@ -1274,6 +1340,7 @@ func (r *QueryRunner) runStream(
 							&message.TextBlock{Type: message.BlockTypeText, Text: content},
 						},
 					}
+					attachAuditEnvelope(am, "assistant", "partial_text", am)
 					select {
 					case out <- am:
 						emitted = true
@@ -1297,6 +1364,7 @@ func (r *QueryRunner) runStream(
 							Model:   req.Model,
 							Content: blocks,
 						}
+						attachAuditEnvelope(am, "assistant", "partial_image", am)
 						select {
 						case out <- am:
 							emitted = true
@@ -1324,6 +1392,7 @@ func (r *QueryRunner) runStream(
 			}
 			if ch.Finish != "" {
 				finishReason = ch.Finish
+				terminalEvent = ev
 			}
 		}
 		return true, nil
@@ -1343,7 +1412,7 @@ func (r *QueryRunner) runStream(
 				}
 				handled, err := processEvent(ev)
 				if err != nil {
-					return "", nil, nil, "", usage, totalCost, err, emitted
+					return "", nil, nil, "", usage, totalCost, terminalEvent, err, emitted
 				}
 				if handled {
 					continue
@@ -1359,7 +1428,7 @@ func (r *QueryRunner) runStream(
 				continue
 			}
 			if _, err := processEvent(ev); err != nil {
-				return "", nil, nil, "", usage, totalCost, err, emitted
+				return "", nil, nil, "", usage, totalCost, terminalEvent, err, emitted
 			}
 		case err, ok := <-errCh:
 			if !ok {
@@ -1367,14 +1436,14 @@ func (r *QueryRunner) runStream(
 				continue
 			}
 			if err != nil {
-				return "", nil, nil, "", usage, totalCost, err, emitted
+				return "", nil, nil, "", usage, totalCost, terminalEvent, err, emitted
 			}
 		case <-ctx.Done():
-			return "", nil, nil, "", usage, totalCost, ctx.Err(), emitted
+			return "", nil, nil, "", usage, totalCost, terminalEvent, ctx.Err(), emitted
 		}
 	}
 
-	return strings.TrimSpace(assistantText.String()), assistantImages, calls, finishReason, usage, totalCost, nil, emitted
+	return strings.TrimSpace(assistantText.String()), assistantImages, calls, finishReason, usage, totalCost, terminalEvent, nil, emitted
 }
 
 type permissionDecision struct {
@@ -1493,10 +1562,28 @@ func parseUsageAndCost(
 			in = numberFromAny(m["prompt_tokens"])
 			out = numberFromAny(m["completion_tokens"])
 		}
+
+		cachedIn := numberFromAny(m["cached_input_tokens"])
+		reasoningOut := numberFromAny(m["reasoning_output_tokens"])
+
+		// OpenAI-format nested details.
+		if ptd, ok := m["prompt_tokens_details"].(map[string]any); ok {
+			if v := numberFromAny(ptd["cached_tokens"]); v != 0 && cachedIn == 0 {
+				cachedIn = v
+			}
+		}
+		if ctd, ok := m["completion_tokens_details"].(map[string]any); ok {
+			if v := numberFromAny(ctd["reasoning_tokens"]); v != 0 && reasoningOut == 0 {
+				reasoningOut = v
+			}
+		}
+
 		if in != 0 || out != 0 {
 			usage = &message.Usage{
-				InputTokens:  in,
-				OutputTokens: out,
+				InputTokens:           in,
+				OutputTokens:          out,
+				CachedInputTokens:     cachedIn,
+				ReasoningOutputTokens: reasoningOut,
 			}
 		}
 		if v, ok := floatFromAny(m["total_cost_usd"]); ok {

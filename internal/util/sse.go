@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/message"
 )
 
 // ParseSSE reads server-sent events and emits parsed JSON data objects.
@@ -39,6 +41,7 @@ func ParseSSE(ctx context.Context, r io.Reader, out chan<- map[string]any, errs 
 			}
 			return true
 		}
+		msg = message.AnnotateRawJSON(msg, []byte(payload))
 		select {
 		case out <- msg:
 			return true

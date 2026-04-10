@@ -2,13 +2,143 @@ package message
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
+
+const rawJSONKey = "\x00sdk_raw_json"
 
 // Message represents any message in the conversation.
 // Use type assertion or type switch to determine the concrete type.
 type Message interface {
 	MessageType() string
+}
+
+// AuditEnvelope contains the provider-native event metadata and canonical payload
+// captured at the SDK boundary.
+type AuditEnvelope struct {
+	EventType string          `json:"event_type"`
+	Subtype   string          `json:"subtype,omitempty"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+func (a *AuditEnvelope) GetEventType() string {
+	if a == nil {
+		return ""
+	}
+
+	return a.EventType
+}
+
+func (a *AuditEnvelope) GetSubtype() string {
+	if a == nil {
+		return ""
+	}
+
+	return a.Subtype
+}
+
+func (a *AuditEnvelope) GetPayload() json.RawMessage {
+	if a == nil {
+		return nil
+	}
+
+	return a.Payload
+}
+
+// AnnotateRawJSON attaches the original raw JSON bytes to a decoded payload so
+// audit envelopes can preserve byte fidelity later in the pipeline.
+func AnnotateRawJSON(data map[string]any, raw []byte) map[string]any {
+	if data == nil || len(raw) == 0 {
+		return data
+	}
+
+	data[rawJSONKey] = append([]byte(nil), raw...)
+
+	return data
+}
+
+func extractRawJSON(data map[string]any) (json.RawMessage, bool) {
+	if data == nil {
+		return nil, false
+	}
+
+	switch raw := data[rawJSONKey].(type) {
+	case []byte:
+		if len(raw) == 0 {
+			return nil, false
+		}
+
+		return append(json.RawMessage(nil), raw...), true
+	case json.RawMessage:
+		if len(raw) == 0 {
+			return nil, false
+		}
+
+		return append(json.RawMessage(nil), raw...), true
+	case string:
+		if raw == "" {
+			return nil, false
+		}
+
+		return json.RawMessage(raw), true
+	default:
+		return nil, false
+	}
+}
+
+func stripRawJSON(data map[string]any) map[string]any {
+	if data == nil {
+		return nil
+	}
+
+	if _, ok := data[rawJSONKey]; !ok {
+		return data
+	}
+
+	sanitized := make(map[string]any, len(data)-1)
+	for key, value := range data {
+		if key == rawJSONKey {
+			continue
+		}
+
+		sanitized[key] = value
+	}
+
+	return sanitized
+}
+
+// NewAuditEnvelope marshals a canonical payload into an audit envelope.
+func NewAuditEnvelope(eventType, subtype string, payload any) (*AuditEnvelope, error) {
+	var (
+		data json.RawMessage
+		err  error
+	)
+
+	switch typed := payload.(type) {
+	case map[string]any:
+		if raw, ok := extractRawJSON(typed); ok {
+			data = raw
+			break
+		}
+
+		data, err = json.Marshal(stripRawJSON(typed))
+	case []byte:
+		data = append(json.RawMessage(nil), typed...)
+	case json.RawMessage:
+		data = append(json.RawMessage(nil), typed...)
+	default:
+		data, err = json.Marshal(payload)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("marshal audit payload: %w", err)
+	}
+
+	return &AuditEnvelope{
+		EventType: eventType,
+		Subtype:   subtype,
+		Payload:   data,
+	}, nil
 }
 
 // Compile-time verification that all message types implement Message.
@@ -142,6 +272,7 @@ type UserMessage struct {
 	UUID            *string            `json:"uuid,omitempty"`
 	ParentToolUseID *string            `json:"parent_tool_use_id,omitempty"`
 	ToolUseResult   map[string]any     `json:"tool_use_result,omitempty"`
+	Audit           *AuditEnvelope     `json:"-"`
 }
 
 // MessageType implements the Message interface.
@@ -156,6 +287,7 @@ type AssistantMessage struct {
 	Model           string                 `json:"model"`
 	ParentToolUseID *string                `json:"parent_tool_use_id,omitempty"`
 	Error           *AssistantMessageError `json:"error,omitempty"`
+	Audit           *AuditEnvelope         `json:"-"`
 }
 
 // MessageType implements the Message interface.
@@ -184,6 +316,7 @@ type SystemMessage struct {
 	Type    string         `json:"type"`
 	Subtype string         `json:"subtype,omitempty"`
 	Data    map[string]any `json:"data,omitempty"`
+	Audit   *AuditEnvelope `json:"-"`
 }
 
 // MessageType implements the Message interface.
@@ -193,17 +326,19 @@ func (m *SystemMessage) MessageType() string { return "system" }
 //
 //nolint:tagliatelle // Legacy compatibility payloads use snake_case.
 type ResultMessage struct {
-	Type             string   `json:"type"`
-	Subtype          string   `json:"subtype"`
-	DurationMs       int      `json:"duration_ms"`
-	DurationAPIMs    int      `json:"duration_api_ms"`
-	IsError          bool     `json:"is_error"`
-	NumTurns         int      `json:"num_turns"`
-	SessionID        string   `json:"session_id"`
-	TotalCostUSD     *float64 `json:"total_cost_usd,omitempty"`
-	Usage            *Usage   `json:"usage,omitempty"`
-	Result           *string  `json:"result,omitempty"`
-	StructuredOutput any      `json:"structured_output,omitempty"`
+	Type             string         `json:"type"`
+	Subtype          string         `json:"subtype"`
+	DurationMs       int            `json:"duration_ms"`
+	DurationAPIMs    int            `json:"duration_api_ms"`
+	IsError          bool           `json:"is_error"`
+	NumTurns         int            `json:"num_turns"`
+	SessionID        string         `json:"session_id"`
+	TotalCostUSD     *float64       `json:"total_cost_usd,omitempty"`
+	Usage            *Usage         `json:"usage,omitempty"`
+	Result           *string        `json:"result,omitempty"`
+	StopReason       *string        `json:"stop_reason,omitempty"`
+	StructuredOutput any            `json:"structured_output,omitempty"`
+	Audit            *AuditEnvelope `json:"-"`
 }
 
 // MessageType implements the Message interface.
@@ -217,6 +352,7 @@ type StreamEvent struct {
 	SessionID       string         `json:"session_id"`
 	Event           map[string]any `json:"event"` // Raw Anthropic API event
 	ParentToolUseID *string        `json:"parent_tool_use_id,omitempty"`
+	Audit           *AuditEnvelope `json:"-"`
 }
 
 // MessageType implements the Message interface.
@@ -226,8 +362,10 @@ func (m *StreamEvent) MessageType() string { return "stream_event" }
 //
 //nolint:tagliatelle // Legacy compatibility payloads use snake_case.
 type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens           int `json:"input_tokens"`
+	OutputTokens          int `json:"output_tokens"`
+	CachedInputTokens     int `json:"cached_input_tokens"`
+	ReasoningOutputTokens int `json:"reasoning_output_tokens"`
 }
 
 // StreamingMessageContent represents the content of a streaming message.

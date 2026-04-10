@@ -2,6 +2,7 @@ package openroutersdk
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -18,6 +19,7 @@ type SessionStat struct {
 	UserTurns           int
 	CheckpointCount     int
 	FileCheckpointCount int
+	SizeBytes           int64
 }
 
 // StatSession returns metadata for a locally persisted SDK session.
@@ -42,7 +44,7 @@ func buildSessionStat(s *session.Session) *SessionStat {
 	if s == nil {
 		return nil
 	}
-	return &SessionStat{
+	stat := &SessionStat{
 		SessionID:           s.ID,
 		CreatedAt:           s.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 		UpdatedAt:           s.UpdatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
@@ -51,6 +53,11 @@ func buildSessionStat(s *session.Session) *SessionStat {
 		CheckpointCount:     len(s.Checkpoints),
 		FileCheckpointCount: len(s.FileCheckpoints),
 	}
+	// Best-effort size estimate.
+	if data, err := json.Marshal(s); err == nil {
+		stat.SizeBytes = int64(len(data))
+	}
+	return stat
 }
 
 func loadSessionManager(opts ...Option) (*session.Manager, error) {
