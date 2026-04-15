@@ -15,6 +15,7 @@ import (
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/hook"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/mcp"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/message"
+	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/observability"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/permission"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/session"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/tools"
@@ -64,12 +65,20 @@ type QueryRunner struct {
 	hooks     *hook.Dispatcher
 	registry  *tools.Registry
 	executor  *tools.Executor
+	obs       *observability.Observer
 }
 
 // NewQueryRunner creates a QueryRunner.
-func NewQueryRunner(opts *config.Options, sessions *session.Manager) *QueryRunner {
+func NewQueryRunner(
+	opts *config.Options,
+	sessions *session.Manager,
+	obs *observability.Observer,
+) *QueryRunner {
 	if sessions == nil {
 		sessions = session.NewManager()
+	}
+	if obs == nil {
+		obs = observability.Noop()
 	}
 	opts.ApplyDefaults()
 	registry := tools.NewRegistry(opts)
@@ -80,6 +89,7 @@ func NewQueryRunner(opts *config.Options, sessions *session.Manager) *QueryRunne
 		hooks:     NewHookDispatcher(opts),
 		registry:  registry,
 		executor:  tools.NewExecutor(opts, registry),
+		obs:       obs,
 	}
 }
 
@@ -248,6 +258,15 @@ func (r *QueryRunner) RunMessages(
 		}
 		s := r.sessions.GetOrCreate(sessionID)
 		runStarted := time.Now()
+
+		// Start query span for the entire conversation turn.
+		model := pickModel(r.opts)
+		ctx, querySpan := r.obs.StartQuerySpan(ctx, model, sessionID)
+		defer func() {
+			duration := time.Since(runStarted).Seconds()
+			r.obs.RecordOperationDuration(ctx, duration, model, sessionID, "")
+			querySpan.End()
+		}()
 
 		history := session.Clone(s.Messages)
 		if len(history) == 0 {
@@ -422,6 +441,15 @@ func (r *QueryRunner) RunMessages(
 				if i == len(models)-1 {
 					errs <- runErr
 					return
+				}
+			}
+
+			// Record token usage from the completed stream.
+			if turnUsage != nil {
+				r.obs.RecordTokenUsage(ctx, int64(turnUsage.InputTokens), "input", reqModel)
+				r.obs.RecordTokenUsage(ctx, int64(turnUsage.OutputTokens), "output", reqModel)
+				if turnUsage.ReasoningOutputTokens > 0 {
+					r.obs.RecordTokenUsage(ctx, int64(turnUsage.ReasoningOutputTokens), "thinking", reqModel)
 				}
 			}
 
@@ -601,14 +629,22 @@ func (r *QueryRunner) RunMessages(
 						return
 					}
 
-					toolOut, err := r.executor.ExecuteWithSuggestions(ctx, c.Name, argsMap, decision.suggestions)
+					toolStart := time.Now()
+					toolCtx, toolSpan := r.obs.StartToolSpan(ctx, c.Name)
+					toolOut, err := r.executor.ExecuteWithSuggestions(toolCtx, c.Name, argsMap, decision.suggestions)
+					toolSpan.End()
+					toolDuration := time.Since(toolStart).Seconds()
+					r.obs.RecordToolCallDuration(ctx, toolDuration, c.Name)
 					if err != nil {
+						outcome := "error"
 						var denyErr *sdkerrors.ToolPermissionDeniedError
 						var isInterrupt *bool
 						if stderrors.As(err, &denyErr) {
 							v := denyErr.Interrupt
 							isInterrupt = &v
+							outcome = "denied"
 						}
+						r.obs.RecordToolCall(ctx, c.Name, outcome)
 						postFailureOuts, _ := r.hooks.Run(ctx, hook.EventPostToolUseFailure, c.Name, &hook.PostToolUseFailureInput{
 							BaseInput:     baseInput(sessionID, r.opts),
 							HookEventName: string(hook.EventPostToolUseFailure),
@@ -645,6 +681,7 @@ func (r *QueryRunner) RunMessages(
 						errs <- err
 						return
 					}
+					r.obs.RecordToolCall(ctx, c.Name, "ok")
 
 					postToolOuts, err := r.hooks.Run(ctx, hook.EventPostToolUse, c.Name, &hook.PostToolUseInput{
 						BaseInput:     baseInput(sessionID, r.opts),
@@ -1297,6 +1334,8 @@ func (r *QueryRunner) runStream(
 ) (string, []message.ImageBlock, map[int]*pendingToolCall, string, *message.Usage, *float64, map[string]any, error, bool) {
 	stream, streamErrs := r.transport.CreateStream(ctx, req)
 
+	streamStart := time.Now()
+	ttftRecorded := false
 	var assistantText strings.Builder
 	assistantImages := []message.ImageBlock{}
 	calls := map[int]*pendingToolCall{}
@@ -1328,6 +1367,10 @@ func (r *QueryRunner) runStream(
 		}
 		for _, ch := range chunks {
 			if ch.Content != "" {
+				if !ttftRecorded {
+					ttftRecorded = true
+					r.obs.RecordTTFT(ctx, time.Since(streamStart).Seconds(), req.Model)
+				}
 				content := normalizeAssistantContent(assistantText.String(), ch.Content)
 				if content != "" {
 					assistantText.WriteString(content)

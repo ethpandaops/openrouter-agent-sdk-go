@@ -4,6 +4,10 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/hook"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/mcp"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/permission"
@@ -86,6 +90,11 @@ type Options struct {
 	OutputFormat             map[string]any
 	EnableFileCheckpointing  bool
 	Transport                Transport
+
+	// Observability
+	MeterProvider        metric.MeterProvider
+	TracerProvider       trace.TracerProvider
+	PrometheusRegisterer prometheus.Registerer
 
 	// OpenRouter specific
 	APIKey            string

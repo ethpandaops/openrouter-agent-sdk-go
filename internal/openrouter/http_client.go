@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/config"
+	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/observability"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/util"
 )
 
@@ -22,6 +23,7 @@ type HTTPTransport struct {
 	client  *http.Client
 	apiKey  string
 	baseURL string
+	obs     *observability.Observer
 
 	mu      sync.Mutex
 	started bool
@@ -35,9 +37,17 @@ func NewHTTPTransport(opts *config.Options) *HTTPTransport {
 	}
 	return &HTTPTransport{
 		opts: opts,
+		obs:  observability.Noop(),
 		client: &http.Client{
 			Timeout: timeout,
 		},
+	}
+}
+
+// SetObserver sets the observability observer for the transport.
+func (t *HTTPTransport) SetObserver(obs *observability.Observer) {
+	if obs != nil {
+		t.obs = obs
 	}
 }
 
@@ -121,15 +131,19 @@ func (t *HTTPTransport) CreateStream(ctx context.Context, req *config.ChatReques
 }
 
 func (t *HTTPTransport) doRequest(ctx context.Context, payload []byte) (*http.Response, error) {
-	u, err := url.JoinPath(strings.TrimSuffix(t.baseURL, "/"), t.endpointPath())
+	endpoint := t.endpointPath()
+	u, err := url.JoinPath(strings.TrimSuffix(t.baseURL, "/"), endpoint)
 	if err != nil {
 		return nil, err
 	}
 
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(payload))
+		reqCtx, reqSpan := t.obs.StartHTTPSpan(ctx, http.MethodPost, endpoint)
+
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, u, bytes.NewReader(payload))
 		if err != nil {
+			reqSpan.End()
 			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+t.apiKey)
@@ -145,16 +159,27 @@ func (t *HTTPTransport) doRequest(ctx context.Context, payload []byte) (*http.Re
 			}
 		}
 
+		isRetry := attempt > 0
 		resp, err := t.client.Do(req)
 		if err != nil {
 			lastErr = err
+			reqSpan.End()
 		} else {
+			sc := observability.StatusClass(resp.StatusCode)
+			t.obs.RecordHTTPRequest(ctx, sc, isRetry)
+
+			if resp.StatusCode == 429 {
+				t.obs.RecordRateLimitEvent(ctx)
+			}
+
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				reqSpan.End()
 				return resp, nil
 			}
 			raw, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
 			lastErr = fmt.Errorf("openrouter error status=%d body=%s", resp.StatusCode, string(raw))
+			reqSpan.End()
 			if resp.StatusCode < 500 && resp.StatusCode != 429 {
 				return nil, lastErr
 			}
