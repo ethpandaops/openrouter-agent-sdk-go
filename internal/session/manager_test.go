@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -56,7 +57,7 @@ func TestEnablePersistenceLoadsExistingSessions(t *testing.T) {
 	}
 	s := m1.GetOrCreate("persisted")
 	s.Messages = []map[string]any{{"role": "user", "content": "hi"}}
-	m1.Snapshot("persisted", "persisted-u1")
+	m1.Snapshot(context.Background(), "persisted", "persisted-u1")
 
 	m2 := NewManager()
 	if err := m2.EnablePersistence(store); err != nil {
@@ -81,7 +82,7 @@ func TestFileSnapshotAndRewindRestoresFilesystem(t *testing.T) {
 	m := NewManager()
 	s := m.GetOrCreate("default")
 	s.Messages = []map[string]any{{"role": "user", "content": "hello"}}
-	m.Snapshot("default", "u1")
+	m.Snapshot(context.Background(), "default", "u1")
 	if err := m.SnapshotFiles("default", "u1", dir); err != nil {
 		t.Fatalf("snapshot files: %v", err)
 	}

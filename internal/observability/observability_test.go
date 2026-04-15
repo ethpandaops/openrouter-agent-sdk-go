@@ -18,11 +18,12 @@ func TestNoopObserverDoesNotPanic(t *testing.T) {
 	ctx := context.Background()
 
 	// None of these should panic.
-	obs.RecordOperationDuration(ctx, 1.5, "test-model", "sess1", "")
+	obs.RecordOperationDuration(ctx, 1.5, "test-model", "")
 	obs.RecordTokenUsage(ctx, 100, "input", "test-model")
 	obs.RecordTokenUsage(ctx, 0, "output", "test-model") // zero — should noop
 	obs.RecordTTFT(ctx, 0.5, "test-model")
 	obs.RecordHTTPRequest(ctx, "2xx", false)
+	obs.RecordHTTPRequestDuration(ctx, 0.5, "2xx", false)
 	obs.RecordRateLimitEvent(ctx)
 	obs.RecordToolCall(ctx, "tool1", "ok")
 	obs.RecordToolCallDuration(ctx, 0.1, "tool1")
@@ -82,6 +83,8 @@ func TestMetricsRecordedWithRealProvider(t *testing.T) {
 	// Record various metrics.
 	obs.RecordHTTPRequest(ctx, "2xx", false)
 	obs.RecordHTTPRequest(ctx, "4xx", true)
+	obs.RecordHTTPRequestDuration(ctx, 0.25, "2xx", false)
+	obs.RecordHTTPRequestDuration(ctx, 1.5, "4xx", true)
 	obs.RecordRateLimitEvent(ctx)
 	obs.RecordToolCall(ctx, "my_tool", "ok")
 	obs.RecordToolCall(ctx, "my_tool", "error")
@@ -90,7 +93,7 @@ func TestMetricsRecordedWithRealProvider(t *testing.T) {
 	obs.RecordCheckpointOp(ctx, "restore", "no_checkpoint")
 	obs.RecordTokenUsage(ctx, 100, "input", "gpt-4")
 	obs.RecordTokenUsage(ctx, 50, "output", "gpt-4")
-	obs.RecordOperationDuration(ctx, 2.5, "gpt-4", "sess1", "")
+	obs.RecordOperationDuration(ctx, 2.5, "gpt-4", "")
 	obs.RecordTTFT(ctx, 0.3, "gpt-4")
 	obs.RecordHookDuration(ctx, 0.01, "pre_tool_use")
 
@@ -105,6 +108,7 @@ func TestMetricsRecordedWithRealProvider(t *testing.T) {
 		}
 	}
 
+	assert.True(t, metrics["openrouter.http_request_duration"], "http_request_duration")
 	assert.True(t, metrics["openrouter.http_requests_total"], "http_requests_total")
 	assert.True(t, metrics["openrouter.rate_limit_events_total"], "rate_limit_events_total")
 	assert.True(t, metrics["openrouter.tool_calls_total"], "tool_calls_total")
@@ -247,4 +251,73 @@ func TestMetricAttributes(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestOperationDurationErrorType(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer func() { _ = mp.Shutdown(context.Background()) }()
+
+	obs := New(Config{MeterProvider: mp})
+	ctx := context.Background()
+
+	// Record a successful operation (no error type).
+	obs.RecordOperationDuration(ctx, 1.0, "gpt-4", "")
+	// Record a failed operation with error type.
+	obs.RecordOperationDuration(ctx, 2.0, "gpt-4", "transport_error")
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(ctx, &rm))
+
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "gen_ai.client.operation.duration" {
+				continue
+			}
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			require.True(t, ok)
+
+			for _, dp := range hist.DataPoints {
+				// Verify no session ID attribute exists.
+				_, hasSession := dp.Attributes.Value(attribute.Key("gen_ai.session.id"))
+				assert.False(t, hasSession,
+					"operation duration should not have session.id attribute")
+
+				// Check that error type is present when set.
+				errTypeVal, hasErr := dp.Attributes.Value(attribute.Key("error.type"))
+				if hasErr {
+					assert.Equal(t, "transport_error", errTypeVal.AsString())
+				}
+			}
+		}
+	}
+}
+
+func TestHTTPRequestDurationRecorded(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer func() { _ = mp.Shutdown(context.Background()) }()
+
+	obs := New(Config{MeterProvider: mp})
+	ctx := context.Background()
+
+	obs.RecordHTTPRequestDuration(ctx, 0.5, "2xx", false)
+	obs.RecordHTTPRequestDuration(ctx, 1.2, "5xx", true)
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(ctx, &rm))
+
+	found := false
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name == "openrouter.http_request_duration" {
+				found = true
+				hist, ok := m.Data.(metricdata.Histogram[float64])
+				require.True(t, ok)
+				assert.GreaterOrEqual(t, len(hist.DataPoints), 1,
+					"should have at least one data point")
+			}
+		}
+	}
+	assert.True(t, found, "http_request_duration metric should exist")
 }

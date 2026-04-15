@@ -160,16 +160,19 @@ func (t *HTTPTransport) doRequest(ctx context.Context, payload []byte) (*http.Re
 		}
 
 		isRetry := attempt > 0
+		reqStart := time.Now()
 		resp, err := t.client.Do(req)
+		reqDuration := time.Since(reqStart).Seconds()
 		if err != nil {
 			lastErr = err
 			reqSpan.End()
 		} else {
 			sc := observability.StatusClass(resp.StatusCode)
-			t.obs.RecordHTTPRequest(ctx, sc, isRetry)
+			t.obs.RecordHTTPRequest(reqCtx, sc, isRetry)
+			t.obs.RecordHTTPRequestDuration(reqCtx, reqDuration, sc, isRetry)
 
 			if resp.StatusCode == 429 {
-				t.obs.RecordRateLimitEvent(ctx)
+				t.obs.RecordRateLimitEvent(reqCtx)
 			}
 
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {

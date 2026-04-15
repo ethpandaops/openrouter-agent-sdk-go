@@ -51,6 +51,7 @@ type Observer struct {
 
 	// SDK-specific metrics.
 	httpRequestsTotal    metric.Int64Counter
+	httpRequestDuration  metric.Float64Histogram
 	toolCallsTotal       metric.Int64Counter
 	toolCallDuration     metric.Float64Histogram
 	checkpointOpsTotal   metric.Int64Counter
@@ -105,13 +106,15 @@ func Noop() *Observer {
 // --- Metric recording helpers ---
 
 // RecordOperationDuration records a gen_ai.client.operation.duration measurement.
+// Note: sessionID is intentionally excluded from metric attributes to avoid
+// unbounded cardinality. It is included on span attributes where high
+// cardinality is expected and manageable.
 func (o *Observer) RecordOperationDuration(
-	ctx context.Context, seconds float64, model, sessionID, errType string,
+	ctx context.Context, seconds float64, model, errType string,
 ) {
 	attrs := []attribute.KeyValue{
 		attrOperation.String("query"),
 		attrModel.String(model),
-		attrSessionID.String(sessionID),
 	}
 	if errType != "" {
 		attrs = append(attrs, attrErrorType.String(errType))
@@ -146,6 +149,16 @@ func (o *Observer) RecordHTTPRequest(
 	ctx context.Context, statusClass string, isRetry bool,
 ) {
 	o.httpRequestsTotal.Add(ctx, 1, metric.WithAttributes(
+		attrStatusClass.String(statusClass),
+		attrRetry.Bool(isRetry),
+	))
+}
+
+// RecordHTTPRequestDuration records openrouter.http_request_duration.
+func (o *Observer) RecordHTTPRequestDuration(
+	ctx context.Context, seconds float64, statusClass string, isRetry bool,
+) {
+	o.httpRequestDuration.Record(ctx, seconds, metric.WithAttributes(
 		attrStatusClass.String(statusClass),
 		attrRetry.Bool(isRetry),
 	))

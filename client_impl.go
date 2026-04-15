@@ -475,7 +475,7 @@ func (c *clientImpl) ActiveSessionID() string {
 }
 
 func (c *clientImpl) Rewind(sessionID, userMessageID string) error {
-	if ok := c.sessions.Rewind(sessionID, userMessageID); !ok {
+	if ok := c.sessions.Rewind(context.Background(), sessionID, userMessageID); !ok {
 		return session.ErrNoCheckpoint
 	}
 	c.mu.Lock()

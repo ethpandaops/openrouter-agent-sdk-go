@@ -122,6 +122,24 @@ func NewHookDispatcher(opts *config.Options) *hook.Dispatcher {
 	return hook.NewDispatcher(opts.Hooks)
 }
 
+// runHookWithObs wraps a hook dispatch call with observability instrumentation,
+// creating a span and recording the hook execution duration.
+func (r *QueryRunner) runHookWithObs(
+	ctx context.Context,
+	event hook.Event,
+	toolName string,
+	input hook.Input,
+	toolUseID *string,
+) ([]hook.JSONOutput, error) {
+	hookCtx, hookSpan := r.obs.StartHookSpan(ctx, string(event))
+	start := time.Now()
+	outs, err := r.hooks.Run(hookCtx, event, toolName, input, toolUseID)
+	hookSpan.End()
+	r.obs.RecordHookDuration(ctx, time.Since(start).Seconds(), string(event))
+
+	return outs, err
+}
+
 // RunPrompt runs a simple user-content turn and streams message outputs.
 func (r *QueryRunner) RunPrompt(
 	ctx context.Context,
@@ -262,9 +280,10 @@ func (r *QueryRunner) RunMessages(
 		// Start query span for the entire conversation turn.
 		model := pickModel(r.opts)
 		ctx, querySpan := r.obs.StartQuerySpan(ctx, model, sessionID)
+		var errType string
 		defer func() {
 			duration := time.Since(runStarted).Seconds()
-			r.obs.RecordOperationDuration(ctx, duration, model, sessionID, "")
+			r.obs.RecordOperationDuration(ctx, duration, model, errType)
 			querySpan.End()
 		}()
 
@@ -286,6 +305,7 @@ func (r *QueryRunner) RunMessages(
 				select {
 				case out <- systemMsg:
 				case <-ctx.Done():
+					errType = "cancelled"
 					errs <- ctx.Err()
 					return
 				}
@@ -298,6 +318,7 @@ func (r *QueryRunner) RunMessages(
 
 		for _, in := range inputs {
 			if r.opts != nil && r.opts.OpenRouterAPIMode == config.OpenRouterAPIModeResponses && in.Message.Content.HasNonTextBlocks() {
+				errType = "invalid_request"
 				errs <- fmt.Errorf("multimodal input requires chat/completions api mode")
 				return
 			}
@@ -316,20 +337,23 @@ func (r *QueryRunner) RunMessages(
 			select {
 			case out <- um:
 			case <-ctx.Done():
+				errType = "cancelled"
 				errs <- ctx.Err()
 				return
 			}
 
-			hookOuts, err := r.hooks.Run(ctx, hook.EventUserPromptSubmit, "", &hook.UserPromptSubmitInput{
+			hookOuts, err := r.runHookWithObs(ctx, hook.EventUserPromptSubmit, "", &hook.UserPromptSubmitInput{
 				BaseInput:     baseInput(sessionID, r.opts),
 				HookEventName: string(hook.EventUserPromptSubmit),
 				Prompt:        in.Message.Content.String(),
 			}, nil)
 			if err != nil {
+				errType = "hook_error"
 				errs <- err
 				return
 			}
 			if err := validateHookOutputs(hook.EventUserPromptSubmit, hookOuts); err != nil {
+				errType = "hook_error"
 				errs <- err
 				return
 			}
@@ -341,9 +365,10 @@ func (r *QueryRunner) RunMessages(
 
 			if r.opts.EnableFileCheckpointing {
 				r.sessions.SetState(sessionID, history, s.UserTurns)
-				r.sessions.Snapshot(sessionID, userID)
+				r.sessions.Snapshot(ctx, sessionID, userID)
 				if r.opts.Cwd != "" {
 					if err := r.sessions.SnapshotFiles(sessionID, userID, r.opts.Cwd); err != nil {
+						errType = "checkpoint_error"
 						errs <- err
 						return
 					}
@@ -435,14 +460,20 @@ func (r *QueryRunner) RunMessages(
 				// If stream already emitted output, do not retry with fallback to avoid
 				// duplicate/partial mixed turn output.
 				if emitted {
+					errType = "transport_error"
 					errs <- runErr
 					return
 				}
 				if i == len(models)-1 {
+					errType = "transport_error"
 					errs <- runErr
 					return
 				}
 			}
+
+			// Update model to reflect the actual model used (may differ
+			// from initial pick after fallback).
+			model = reqModel
 
 			// Record token usage from the completed stream.
 			if turnUsage != nil {
@@ -457,6 +488,7 @@ func (r *QueryRunner) RunMessages(
 				totalCost += turnTotalCost
 			}
 			if r.opts != nil && r.opts.MaxBudgetUSD != nil && turnCostSeen && totalCost > *r.opts.MaxBudgetUSD {
+				errType = "budget_exceeded"
 				msg := fmt.Sprintf("max budget exceeded: spent %.6f > budget %.6f", totalCost, *r.opts.MaxBudgetUSD)
 				res := &message.ResultMessage{
 					Type:          "result",
@@ -510,6 +542,7 @@ func (r *QueryRunner) RunMessages(
 					select {
 					case out <- am:
 					case <-ctx.Done():
+						errType = "cancelled"
 						errs <- ctx.Err()
 						return
 					}
@@ -542,12 +575,13 @@ func (r *QueryRunner) RunMessages(
 					select {
 					case out <- assistantToolMsg:
 					case <-ctx.Done():
+						errType = "cancelled"
 						errs <- ctx.Err()
 						return
 					}
 
 					toolUseID := c.ID
-					hookOuts, err := r.hooks.Run(ctx, hook.EventPermissionRequest, c.Name, &hook.PermissionRequestInput{
+					hookOuts, err := r.runHookWithObs(ctx, hook.EventPermissionRequest, c.Name, &hook.PermissionRequestInput{
 						BaseInput:             baseInput(sessionID, r.opts),
 						HookEventName:         string(hook.EventPermissionRequest),
 						ToolName:              c.Name,
@@ -555,10 +589,12 @@ func (r *QueryRunner) RunMessages(
 						PermissionSuggestions: nil,
 					}, &toolUseID)
 					if err != nil {
+						errType = "hook_error"
 						errs <- err
 						return
 					}
 					if err := validateHookOutputs(hook.EventPermissionRequest, hookOuts); err != nil {
+						errType = "hook_error"
 						errs <- err
 						return
 					}
@@ -576,7 +612,7 @@ func (r *QueryRunner) RunMessages(
 							Interrupt: decision.interrupt,
 						}
 						v := denyErr.Interrupt
-						postFailureOuts, _ := r.hooks.Run(ctx, hook.EventPostToolUseFailure, c.Name, &hook.PostToolUseFailureInput{
+						postFailureOuts, _ := r.runHookWithObs(ctx, hook.EventPostToolUseFailure, c.Name, &hook.PostToolUseFailureInput{
 							BaseInput:     baseInput(sessionID, r.opts),
 							HookEventName: string(hook.EventPostToolUseFailure),
 							ToolName:      c.Name,
@@ -586,10 +622,12 @@ func (r *QueryRunner) RunMessages(
 							IsInterrupt:   &v,
 						}, &toolUseID)
 						if err := validateHookOutputs(hook.EventPostToolUseFailure, postFailureOuts); err != nil {
+							errType = "hook_error"
 							errs <- err
 							return
 						}
 						if denyErr.Interrupt {
+							errType = "permission_denied"
 							msg := denyErr.Error()
 							res := &message.ResultMessage{
 								Type:       "result",
@@ -609,11 +647,12 @@ func (r *QueryRunner) RunMessages(
 							}
 							return
 						}
+						errType = "permission_denied"
 						errs <- denyErr
 						return
 					}
 
-					preToolOuts, err := r.hooks.Run(ctx, hook.EventPreToolUse, c.Name, &hook.PreToolUseInput{
+					preToolOuts, err := r.runHookWithObs(ctx, hook.EventPreToolUse, c.Name, &hook.PreToolUseInput{
 						BaseInput:     baseInput(sessionID, r.opts),
 						HookEventName: string(hook.EventPreToolUse),
 						ToolName:      c.Name,
@@ -621,10 +660,12 @@ func (r *QueryRunner) RunMessages(
 						ToolUseID:     c.ID,
 					}, &toolUseID)
 					if err != nil {
+						errType = "hook_error"
 						errs <- err
 						return
 					}
 					if err := validateHookOutputs(hook.EventPreToolUse, preToolOuts); err != nil {
+						errType = "hook_error"
 						errs <- err
 						return
 					}
@@ -645,7 +686,7 @@ func (r *QueryRunner) RunMessages(
 							outcome = "denied"
 						}
 						r.obs.RecordToolCall(ctx, c.Name, outcome)
-						postFailureOuts, _ := r.hooks.Run(ctx, hook.EventPostToolUseFailure, c.Name, &hook.PostToolUseFailureInput{
+						postFailureOuts, _ := r.runHookWithObs(ctx, hook.EventPostToolUseFailure, c.Name, &hook.PostToolUseFailureInput{
 							BaseInput:     baseInput(sessionID, r.opts),
 							HookEventName: string(hook.EventPostToolUseFailure),
 							ToolName:      c.Name,
@@ -655,10 +696,12 @@ func (r *QueryRunner) RunMessages(
 							IsInterrupt:   isInterrupt,
 						}, &toolUseID)
 						if hookErr := validateHookOutputs(hook.EventPostToolUseFailure, postFailureOuts); hookErr != nil {
+							errType = "hook_error"
 							errs <- hookErr
 							return
 						}
 						if denyErr != nil && denyErr.Interrupt {
+							errType = "permission_denied"
 							msg := denyErr.Error()
 							res := &message.ResultMessage{
 								Type:       "result",
@@ -678,12 +721,13 @@ func (r *QueryRunner) RunMessages(
 							}
 							return
 						}
+						errType = "tool_error"
 						errs <- err
 						return
 					}
 					r.obs.RecordToolCall(ctx, c.Name, "ok")
 
-					postToolOuts, err := r.hooks.Run(ctx, hook.EventPostToolUse, c.Name, &hook.PostToolUseInput{
+					postToolOuts, err := r.runHookWithObs(ctx, hook.EventPostToolUse, c.Name, &hook.PostToolUseInput{
 						BaseInput:     baseInput(sessionID, r.opts),
 						HookEventName: string(hook.EventPostToolUse),
 						ToolName:      c.Name,
@@ -692,10 +736,12 @@ func (r *QueryRunner) RunMessages(
 						ToolResponse:  toolOut,
 					}, &toolUseID)
 					if err != nil {
+						errType = "hook_error"
 						errs <- err
 						return
 					}
 					if err := validateHookOutputs(hook.EventPostToolUse, postToolOuts); err != nil {
+						errType = "hook_error"
 						errs <- err
 						return
 					}
@@ -782,17 +828,19 @@ func (r *QueryRunner) RunMessages(
 			}
 
 			r.sessions.SetState(sessionID, history, s.UserTurns)
-			stopOuts, _ := r.hooks.Run(ctx, hook.EventStop, "", &hook.StopInput{
+			stopOuts, _ := r.runHookWithObs(ctx, hook.EventStop, "", &hook.StopInput{
 				BaseInput:     baseInput(sessionID, r.opts),
 				HookEventName: string(hook.EventStop),
 			}, nil)
 			if err := validateHookOutputs(hook.EventStop, stopOuts); err != nil {
+				errType = "hook_error"
 				errs <- err
 				return
 			}
 			return
 		}
 
+		errType = "max_turns"
 		errs <- fmt.Errorf("max turns reached without terminal response")
 	}()
 

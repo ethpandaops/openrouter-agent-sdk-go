@@ -32,6 +32,12 @@ func (o *Observer) initMetrics() {
 		metric.WithUnit("{request}"),
 	)
 
+	o.httpRequestDuration, _ = o.meter.Float64Histogram(
+		"openrouter.http_request_duration",
+		metric.WithDescription("Duration of HTTP requests to OpenRouter API"),
+		metric.WithUnit("s"),
+	)
+
 	o.toolCallsTotal, _ = o.meter.Int64Counter(
 		"openrouter.tool_calls_total",
 		metric.WithDescription("Total number of tool call invocations"),

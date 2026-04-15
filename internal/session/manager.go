@@ -152,39 +152,39 @@ func (m *Manager) NewForkID(base string) string {
 }
 
 // Snapshot stores a checkpoint for a user message.
-func (m *Manager) Snapshot(id, userMessageID string) {
+func (m *Manager) Snapshot(ctx context.Context, id, userMessageID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s, ok := m.sessions[id]
 	if !ok || userMessageID == "" {
-		m.obs.RecordCheckpointOp(context.Background(), "create", "error")
+		m.obs.RecordCheckpointOp(ctx, "create", "error")
 		return
 	}
 	cp := cloneMessages(s.Messages)
 	s.Checkpoints[userMessageID] = cp
 	touchSession(s)
 	_ = m.saveLocked()
-	m.obs.RecordCheckpointOp(context.Background(), "create", "ok")
+	m.obs.RecordCheckpointOp(ctx, "create", "ok")
 }
 
 // Rewind rewinds to a checkpoint.
-func (m *Manager) Rewind(id, userMessageID string) bool {
+func (m *Manager) Rewind(ctx context.Context, id, userMessageID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s, ok := m.sessions[id]
 	if !ok {
-		m.obs.RecordCheckpointOp(context.Background(), "restore", "error")
+		m.obs.RecordCheckpointOp(ctx, "restore", "error")
 		return false
 	}
 	cp, ok := s.Checkpoints[userMessageID]
 	if !ok {
-		m.obs.RecordCheckpointOp(context.Background(), "restore", "no_checkpoint")
+		m.obs.RecordCheckpointOp(ctx, "restore", "no_checkpoint")
 		return false
 	}
 	s.Messages = cloneMessages(cp)
 	touchSession(s)
 	_ = m.saveLocked()
-	m.obs.RecordCheckpointOp(context.Background(), "restore", "ok")
+	m.obs.RecordCheckpointOp(ctx, "restore", "ok")
 	return true
 }
 
