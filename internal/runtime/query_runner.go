@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	agenterrclass "github.com/ethpandaops/agent-sdk-observability/errclass"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/config"
 	sdkerrors "github.com/ethpandaops/openrouter-agent-sdk-go/internal/errors"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/hook"
@@ -19,6 +20,7 @@ import (
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/permission"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/session"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/tools"
+	upstreamgenai "go.opentelemetry.io/otel/semconv/v1.40.0/genaiconv"
 )
 
 type pendingToolCall struct {
@@ -134,8 +136,15 @@ func (r *QueryRunner) runHookWithObs(
 	hookCtx, hookSpan := r.obs.StartHookSpan(ctx, string(event))
 	start := time.Now()
 	outs, err := r.hooks.Run(hookCtx, event, toolName, input, toolUseID)
+	outcome := "ok"
+	if err != nil {
+		outcome = "error"
+		hookSpan.RecordError(err)
+	} else {
+		hookSpan.SetAttributes(observability.Outcome(outcome))
+	}
 	hookSpan.End()
-	r.obs.RecordHookDuration(ctx, time.Since(start).Seconds(), string(event))
+	r.obs.RecordHookDuration(hookCtx, time.Since(start).Seconds(), string(event), outcome)
 
 	return outs, err
 }
@@ -279,11 +288,15 @@ func (r *QueryRunner) RunMessages(
 
 		// Start query span for the entire conversation turn.
 		model := pickModel(r.opts)
-		ctx, querySpan := r.obs.StartQuerySpan(ctx, model, sessionID)
+		ctx, querySpan := r.obs.StartQuerySpan(ctx, upstreamgenai.OperationNameChat, model, sessionID)
 		var errType string
 		defer func() {
 			duration := time.Since(runStarted).Seconds()
-			r.obs.RecordOperationDuration(ctx, duration, model, errType)
+			r.obs.RecordOperationDuration(ctx, duration, upstreamgenai.OperationNameChat, model, agenterrclass.Class(errType))
+			if errType != "" {
+				querySpan.MarkError(agenterrclass.Class(errType))
+			}
+			// Unset span status implies success — no explicit Ok needed.
 			querySpan.End()
 		}()
 
@@ -477,10 +490,13 @@ func (r *QueryRunner) RunMessages(
 
 			// Record token usage from the completed stream.
 			if turnUsage != nil {
-				r.obs.RecordTokenUsage(ctx, int64(turnUsage.InputTokens), "input", reqModel)
-				r.obs.RecordTokenUsage(ctx, int64(turnUsage.OutputTokens), "output", reqModel)
+				r.obs.RecordTokenUsage(ctx, int64(turnUsage.InputTokens),
+					upstreamgenai.TokenTypeInput, upstreamgenai.OperationNameChat, reqModel)
+				r.obs.RecordTokenUsage(ctx, int64(turnUsage.OutputTokens),
+					upstreamgenai.TokenTypeOutput, upstreamgenai.OperationNameChat, reqModel)
 				if turnUsage.ReasoningOutputTokens > 0 {
-					r.obs.RecordTokenUsage(ctx, int64(turnUsage.ReasoningOutputTokens), "thinking", reqModel)
+					r.obs.RecordTokenUsage(ctx, int64(turnUsage.ReasoningOutputTokens),
+						upstreamgenai.TokenTypeAttr("thinking"), upstreamgenai.OperationNameChat, reqModel)
 				}
 			}
 
@@ -611,6 +627,11 @@ func (r *QueryRunner) RunMessages(
 							Message:   decision.message,
 							Interrupt: decision.interrupt,
 						}
+						toolCtx, toolSpan := r.obs.StartToolSpan(ctx, c.Name, c.ID)
+						toolSpan.RecordError(denyErr)
+						toolSpan.SetAttributes(observability.Outcome("denied"))
+						toolSpan.End()
+						r.obs.RecordToolCall(toolCtx, c.Name, "denied")
 						v := denyErr.Interrupt
 						postFailureOuts, _ := r.runHookWithObs(ctx, hook.EventPostToolUseFailure, c.Name, &hook.PostToolUseFailureInput{
 							BaseInput:     baseInput(sessionID, r.opts),
@@ -671,11 +692,10 @@ func (r *QueryRunner) RunMessages(
 					}
 
 					toolStart := time.Now()
-					toolCtx, toolSpan := r.obs.StartToolSpan(ctx, c.Name)
+					toolCtx, toolSpan := r.obs.StartToolSpan(ctx, c.Name, c.ID)
 					toolOut, err := r.executor.ExecuteWithSuggestions(toolCtx, c.Name, argsMap, decision.suggestions)
-					toolSpan.End()
 					toolDuration := time.Since(toolStart).Seconds()
-					r.obs.RecordToolCallDuration(ctx, toolDuration, c.Name)
+					r.obs.RecordToolCallDuration(toolCtx, toolDuration, c.Name)
 					if err != nil {
 						outcome := "error"
 						var denyErr *sdkerrors.ToolPermissionDeniedError
@@ -685,7 +705,10 @@ func (r *QueryRunner) RunMessages(
 							isInterrupt = &v
 							outcome = "denied"
 						}
-						r.obs.RecordToolCall(ctx, c.Name, outcome)
+						toolSpan.RecordError(err)
+						toolSpan.SetAttributes(observability.Outcome(outcome))
+						toolSpan.End()
+						r.obs.RecordToolCall(toolCtx, c.Name, outcome)
 						postFailureOuts, _ := r.runHookWithObs(ctx, hook.EventPostToolUseFailure, c.Name, &hook.PostToolUseFailureInput{
 							BaseInput:     baseInput(sessionID, r.opts),
 							HookEventName: string(hook.EventPostToolUseFailure),
@@ -725,7 +748,9 @@ func (r *QueryRunner) RunMessages(
 						errs <- err
 						return
 					}
-					r.obs.RecordToolCall(ctx, c.Name, "ok")
+					// Unset span status implies success.
+					toolSpan.End()
+					r.obs.RecordToolCall(toolCtx, c.Name, "ok")
 
 					postToolOuts, err := r.runHookWithObs(ctx, hook.EventPostToolUse, c.Name, &hook.PostToolUseInput{
 						BaseInput:     baseInput(sessionID, r.opts),
@@ -1414,11 +1439,11 @@ func (r *QueryRunner) runStream(
 			return true, nil
 		}
 		for _, ch := range chunks {
+			if !ttftRecorded && (ch.Content != "" || len(ch.Images) > 0 || len(ch.ToolDeltas) > 0) {
+				ttftRecorded = true
+				r.obs.RecordTTFT(ctx, time.Since(streamStart).Seconds(), req.Model)
+			}
 			if ch.Content != "" {
-				if !ttftRecorded {
-					ttftRecorded = true
-					r.obs.RecordTTFT(ctx, time.Since(streamStart).Seconds(), req.Model)
-				}
 				content := normalizeAssistantContent(assistantText.String(), ch.Content)
 				if content != "" {
 					assistantText.WriteString(content)

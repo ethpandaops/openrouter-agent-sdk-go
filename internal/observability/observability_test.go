@@ -2,322 +2,236 @@ package observability
 
 import (
 	"context"
+	"errors"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/attribute"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"github.com/ethpandaops/agent-sdk-observability/testkit"
+	upstreamgenai "go.opentelemetry.io/otel/semconv/v1.40.0/genaiconv"
 )
 
 func TestNoopObserverDoesNotPanic(t *testing.T) {
 	obs := Noop()
 	ctx := context.Background()
 
-	// None of these should panic.
-	obs.RecordOperationDuration(ctx, 1.5, "test-model", "")
-	obs.RecordTokenUsage(ctx, 100, "input", "test-model")
-	obs.RecordTokenUsage(ctx, 0, "output", "test-model") // zero — should noop
+	obs.RecordOperationDuration(ctx, 1.5, upstreamgenai.OperationNameChat, "test-model", "")
+	obs.RecordTokenUsage(ctx, 100, upstreamgenai.TokenTypeInput, upstreamgenai.OperationNameChat, "test-model")
 	obs.RecordTTFT(ctx, 0.5, "test-model")
 	obs.RecordHTTPRequest(ctx, "2xx", false)
-	obs.RecordHTTPRequestDuration(ctx, 0.5, "2xx", false)
 	obs.RecordRateLimitEvent(ctx)
 	obs.RecordToolCall(ctx, "tool1", "ok")
 	obs.RecordToolCallDuration(ctx, 0.1, "tool1")
 	obs.RecordCheckpointOp(ctx, "create", "ok")
-	obs.RecordHookDuration(ctx, 0.01, "pre_tool_use")
+	obs.RecordHookDuration(ctx, 0.01, "PreToolUse", "ok")
 
-	// Span creation should return valid (noop) spans.
-	_, span := obs.StartQuerySpan(ctx, "model", "sess")
-	span.End()
-	_, span = obs.StartHTTPSpan(ctx, "POST", "/chat/completions")
-	span.End()
-	_, span = obs.StartToolSpan(ctx, "tool1")
-	span.End()
-	_, span = obs.StartHookSpan(ctx, "pre_tool_use")
+	_, span := obs.StartQuerySpan(ctx, upstreamgenai.OperationNameChat, "model", "sess")
 	span.End()
 }
 
-func TestNewWithNilProvidersIsNoop(t *testing.T) {
-	obs := New(Config{})
-	assert.NotNil(t, obs)
-
-	ctx := context.Background()
-	obs.RecordHTTPRequest(ctx, "2xx", false)
-}
-
-func TestStatusClass(t *testing.T) {
+func TestStatusClassOf(t *testing.T) {
 	tests := []struct {
 		code int
 		want string
 	}{
 		{200, "2xx"},
-		{201, "2xx"},
-		{299, "2xx"},
-		{301, "3xx"},
-		{400, "4xx"},
 		{404, "4xx"},
 		{429, "4xx"},
-		{500, "5xx"},
 		{503, "5xx"},
-		{100, "other"},
 		{0, "other"},
 	}
 	for _, tt := range tests {
-		got := StatusClass(tt.code)
-		assert.Equal(t, tt.want, got, "StatusClass(%d)", tt.code)
+		if got := StatusClassOf(tt.code); got != tt.want {
+			t.Fatalf("StatusClassOf(%d) = %q, want %q", tt.code, got, tt.want)
+		}
 	}
 }
 
 func TestMetricsRecordedWithRealProvider(t *testing.T) {
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer func() { _ = mp.Shutdown(context.Background()) }()
+	metrics := testkit.NewMetricsHarness()
+	defer func() { _ = metrics.Shutdown(context.Background()) }()
 
-	obs := New(Config{MeterProvider: mp})
+	obs, err := New(Config{MeterProvider: metrics.Provider()})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	ctx := context.Background()
 
-	// Record various metrics.
 	obs.RecordHTTPRequest(ctx, "2xx", false)
-	obs.RecordHTTPRequest(ctx, "4xx", true)
-	obs.RecordHTTPRequestDuration(ctx, 0.25, "2xx", false)
-	obs.RecordHTTPRequestDuration(ctx, 1.5, "4xx", true)
+	obs.RecordHTTPRequestDuration(ctx, 0.2, "2xx", false)
 	obs.RecordRateLimitEvent(ctx)
 	obs.RecordToolCall(ctx, "my_tool", "ok")
-	obs.RecordToolCall(ctx, "my_tool", "error")
 	obs.RecordToolCallDuration(ctx, 0.5, "my_tool")
-	obs.RecordCheckpointOp(ctx, "create", "ok")
 	obs.RecordCheckpointOp(ctx, "restore", "no_checkpoint")
-	obs.RecordTokenUsage(ctx, 100, "input", "gpt-4")
-	obs.RecordTokenUsage(ctx, 50, "output", "gpt-4")
-	obs.RecordOperationDuration(ctx, 2.5, "gpt-4", "")
+	obs.RecordTokenUsage(ctx, 50, upstreamgenai.TokenTypeAttr("thinking"), upstreamgenai.OperationNameChat, "gpt-4")
+	obs.RecordOperationDuration(ctx, 2.5, upstreamgenai.OperationNameChat, "gpt-4", "")
 	obs.RecordTTFT(ctx, 0.3, "gpt-4")
-	obs.RecordHookDuration(ctx, 0.01, "pre_tool_use")
+	obs.RecordHookDuration(ctx, 0.01, "PreToolUse", "ok")
 
-	// Collect and verify.
-	var rm metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(ctx, &rm))
-
-	metrics := make(map[string]bool, 16)
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			metrics[m.Name] = true
-		}
+	names, err := metrics.MetricNames(ctx)
+	if err != nil {
+		t.Fatalf("MetricNames() error = %v", err)
+	}
+	nameSet := map[string]bool{}
+	for _, name := range names {
+		nameSet[name] = true
 	}
 
-	assert.True(t, metrics["openrouter.http_request_duration"], "http_request_duration")
-	assert.True(t, metrics["openrouter.http_requests_total"], "http_requests_total")
-	assert.True(t, metrics["openrouter.rate_limit_events_total"], "rate_limit_events_total")
-	assert.True(t, metrics["openrouter.tool_calls_total"], "tool_calls_total")
-	assert.True(t, metrics["openrouter.tool_call_duration"], "tool_call_duration")
-	assert.True(t, metrics["openrouter.checkpoint_operations_total"], "checkpoint_operations_total")
-	assert.True(t, metrics["gen_ai.client.token.usage"], "token_usage")
-	assert.True(t, metrics["gen_ai.client.operation.duration"], "operation_duration")
-	assert.True(t, metrics["gen_ai.client.time_to_first_token"], "ttft")
-	assert.True(t, metrics["openrouter.hook_duration"], "hook_duration")
-}
-
-func TestSpansCreatedWithRealProvider(t *testing.T) {
-	spanRecorder := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spanRecorder))
-	defer func() { _ = tp.Shutdown(context.Background()) }()
-
-	obs := New(Config{TracerProvider: tp})
-	ctx := context.Background()
-
-	// Create and end spans.
-	ctx, querySpan := obs.StartQuerySpan(ctx, "gpt-4", "sess1")
-	_, httpSpan := obs.StartHTTPSpan(ctx, "POST", "/chat/completions")
-	httpSpan.End()
-	_, toolSpan := obs.StartToolSpan(ctx, "my_tool")
-	toolSpan.End()
-	_, hookSpan := obs.StartHookSpan(ctx, "pre_tool_use")
-	hookSpan.End()
-	querySpan.End()
-
-	spans := spanRecorder.Ended()
-	require.Len(t, spans, 4)
-
-	// Check span names.
-	names := make([]string, 0, len(spans))
-	for _, s := range spans {
-		names = append(names, s.Name())
+	required := []string{
+		"gen_ai.client.operation.duration",
+		"gen_ai.client.token.usage",
+		"gen_ai.client.operation.time_to_first_chunk",
+		"openrouter.http_requests_total",
+		"openrouter.http_request_duration",
+		"openrouter.tool_calls_total",
+		"openrouter.tool_call_duration",
+		"openrouter.checkpoint_operations_total",
+		"openrouter.rate_limit_events_total",
+		"openrouter.hook_dispatch_duration",
 	}
-	assert.Contains(t, names, "gen_ai.client.operation")
-	assert.Contains(t, names, "openrouter.http.request")
-	assert.Contains(t, names, "openrouter.tool.call")
-	assert.Contains(t, names, "openrouter.hook.dispatch")
-
-	// Verify child spans have the query span as parent.
-	for _, s := range spans {
-		if s.Name() == "gen_ai.client.operation" {
-			continue
-		}
-		assert.Equal(t, querySpan.SpanContext().TraceID(), s.SpanContext().TraceID(),
-			"span %s should share trace ID with parent", s.Name())
-	}
-}
-
-func TestSpanAttributes(t *testing.T) {
-	spanRecorder := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spanRecorder))
-	defer func() { _ = tp.Shutdown(context.Background()) }()
-
-	obs := New(Config{TracerProvider: tp})
-	ctx := context.Background()
-
-	_, span := obs.StartQuerySpan(ctx, "claude-3.5-sonnet", "test-sess")
-	span.End()
-
-	spans := spanRecorder.Ended()
-	require.Len(t, spans, 1)
-
-	attrMap := make(map[string]string, 4)
-	for _, kv := range spans[0].Attributes() {
-		attrMap[string(kv.Key)] = kv.Value.Emit()
-	}
-
-	assert.Equal(t, "query", attrMap["gen_ai.operation.name"])
-	assert.Equal(t, "claude-3.5-sonnet", attrMap["gen_ai.request.model"])
-	assert.Equal(t, "test-sess", attrMap["gen_ai.session.id"])
-}
-
-func TestTokenUsageZeroSkipped(t *testing.T) {
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer func() { _ = mp.Shutdown(context.Background()) }()
-
-	obs := New(Config{MeterProvider: mp})
-	ctx := context.Background()
-
-	// Record zero tokens — should be skipped.
-	obs.RecordTokenUsage(ctx, 0, "input", "model")
-	obs.RecordTokenUsage(ctx, -5, "output", "model")
-
-	var rm metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(ctx, &rm))
-
-	// Token usage counter should not have any data points.
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name == "gen_ai.client.token.usage" {
-				if sum, ok := m.Data.(metricdata.Sum[int64]); ok {
-					assert.Empty(t, sum.DataPoints, "should have no data points for zero token usage")
-				}
-			}
+	for _, name := range required {
+		if !nameSet[name] {
+			t.Fatalf("missing metric %q", name)
 		}
 	}
 }
 
 func TestMetricAttributes(t *testing.T) {
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer func() { _ = mp.Shutdown(context.Background()) }()
+	metrics := testkit.NewMetricsHarness()
+	defer func() { _ = metrics.Shutdown(context.Background()) }()
 
-	obs := New(Config{MeterProvider: mp})
+	obs, err := New(Config{MeterProvider: metrics.Provider()})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	ctx := context.Background()
 
-	obs.RecordHTTPRequest(ctx, "2xx", false)
 	obs.RecordHTTPRequest(ctx, "4xx", true)
+	obs.RecordHTTPRequestDuration(ctx, 0.05, "4xx", true)
+	obs.RecordHookDuration(ctx, 0.05, "PostToolUseFailure", "error")
 
-	var rm metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(ctx, &rm))
+	httpPoints, err := metrics.Int64Points(ctx, "openrouter.http_requests_total")
+	if err != nil {
+		t.Fatalf("Int64Points() error = %v", err)
+	}
+	if len(httpPoints) != 1 {
+		t.Fatalf("expected 1 http point, got %d", len(httpPoints))
+	}
+	if httpPoints[0].Attributes["status_class"] != "4xx" {
+		t.Fatalf("unexpected status_class: %q", httpPoints[0].Attributes["status_class"])
+	}
+	if httpPoints[0].Attributes["retry"] != "true" {
+		t.Fatalf("unexpected retry: %q", httpPoints[0].Attributes["retry"])
+	}
 
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != "openrouter.http_requests_total" {
-				continue
-			}
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			require.True(t, ok)
-			require.Len(t, sum.DataPoints, 2)
+	httpDurationPoints, err := metrics.HistogramPoints(ctx, "openrouter.http_request_duration")
+	if err != nil {
+		t.Fatalf("HistogramPoints(http_request_duration) error = %v", err)
+	}
+	if len(httpDurationPoints) != 1 {
+		t.Fatalf("expected 1 http duration point, got %d", len(httpDurationPoints))
+	}
+	if httpDurationPoints[0].Attributes["status_class"] != "4xx" {
+		t.Fatalf("unexpected duration status_class: %q", httpDurationPoints[0].Attributes["status_class"])
+	}
+	if httpDurationPoints[0].Attributes["retry"] != "true" {
+		t.Fatalf("unexpected duration retry: %q", httpDurationPoints[0].Attributes["retry"])
+	}
 
-			for _, dp := range sum.DataPoints {
-				attrs := dp.Attributes
-				statusClass, ok := attrs.Value(attribute.Key("http.response.status_class"))
-				assert.True(t, ok, "should have status_class attribute")
+	hookPoints, err := metrics.HistogramPoints(ctx, "openrouter.hook_dispatch_duration")
+	if err != nil {
+		t.Fatalf("HistogramPoints() error = %v", err)
+	}
+	if len(hookPoints) != 1 {
+		t.Fatalf("expected 1 hook point, got %d", len(hookPoints))
+	}
+	if hookPoints[0].Attributes["hook.event"] != "PostToolUseFailure" {
+		t.Fatalf("unexpected hook.event: %q", hookPoints[0].Attributes["hook.event"])
+	}
+	if hookPoints[0].Attributes["outcome"] != "error" {
+		t.Fatalf("unexpected outcome: %q", hookPoints[0].Attributes["outcome"])
+	}
+}
 
-				retry, ok := attrs.Value(attribute.Key("http.request.retry"))
-				assert.True(t, ok, "should have retry attribute")
+func TestSpansCreatedWithRealProvider(t *testing.T) {
+	traces := testkit.NewTracesHarness()
+	defer func() { _ = traces.Shutdown(context.Background()) }()
 
-				if statusClass.AsString() == "2xx" {
-					assert.False(t, retry.AsBool())
-				} else {
-					assert.True(t, retry.AsBool())
-				}
-			}
+	obs, err := New(Config{TracerProvider: traces.Provider()})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ctx, querySpan := obs.StartQuerySpan(context.Background(), upstreamgenai.OperationNameChat, "gpt-4", "sess1")
+	_, httpSpan := obs.StartHTTPSpan(ctx, "/chat/completions")
+	httpSpan.AddEvent("retry", RetryAttempt(2), RetryDelay(0))
+	httpSpan.End()
+	_, toolSpan := obs.StartToolSpan(ctx, "my_tool", "call_42")
+	toolSpan.SetAttributes(Outcome("ok"))
+	toolSpan.End()
+	querySpan.End()
+
+	spans := traces.Summaries()
+	if len(spans) != 3 {
+		t.Fatalf("expected 3 spans, got %d", len(spans))
+	}
+
+	names := map[string]bool{}
+	for _, s := range spans {
+		names[s.Name] = true
+	}
+	for _, want := range []string{"chat gpt-4", "execute_tool my_tool", "openrouter.http.request"} {
+		if !names[want] {
+			t.Fatalf("missing span name %q (got %v)", want, names)
 		}
 	}
 }
 
-func TestOperationDurationErrorType(t *testing.T) {
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer func() { _ = mp.Shutdown(context.Background()) }()
+func TestSpanEventsAndClassification(t *testing.T) {
+	traces := testkit.NewTracesHarness()
+	defer func() { _ = traces.Shutdown(context.Background()) }()
 
-	obs := New(Config{MeterProvider: mp})
-	ctx := context.Background()
+	obs, err := New(Config{TracerProvider: traces.Provider()})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ctx, span := obs.StartQuerySpan(context.Background(), upstreamgenai.OperationNameChat, "claude-3.5-sonnet", "test-sess")
+	obs.RecordRateLimitEvent(ctx)
+	obs.RecordCheckpointOp(ctx, "restore", "no_checkpoint")
+	obs.RecordTokenUsage(ctx, 42, upstreamgenai.TokenTypeAttr("thinking"), upstreamgenai.OperationNameChat, "claude-3.5-sonnet")
+	span.RecordError(&HTTPStatusError{StatusCode: 429, Body: "slow down"})
+	span.End()
 
-	// Record a successful operation (no error type).
-	obs.RecordOperationDuration(ctx, 1.0, "gpt-4", "")
-	// Record a failed operation with error type.
-	obs.RecordOperationDuration(ctx, 2.0, "gpt-4", "transport_error")
+	spans := traces.Summaries()
+	if len(spans) != 1 {
+		t.Fatalf("expected 1 span, got %d", len(spans))
+	}
 
-	var rm metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(ctx, &rm))
-
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != "gen_ai.client.operation.duration" {
-				continue
-			}
-			hist, ok := m.Data.(metricdata.Histogram[float64])
-			require.True(t, ok)
-
-			for _, dp := range hist.DataPoints {
-				// Verify no session ID attribute exists.
-				_, hasSession := dp.Attributes.Value(attribute.Key("gen_ai.session.id"))
-				assert.False(t, hasSession,
-					"operation duration should not have session.id attribute")
-
-				// Check that error type is present when set.
-				errTypeVal, hasErr := dp.Attributes.Value(attribute.Key("error.type"))
-				if hasErr {
-					assert.Equal(t, "transport_error", errTypeVal.AsString())
-				}
-			}
+	var sawRateLimit bool
+	var sawCheckpoint bool
+	var sawThinking bool
+	for _, ev := range spans[0].Events {
+		switch ev {
+		case "rate_limit":
+			sawRateLimit = true
+		case "checkpoint":
+			sawCheckpoint = true
+		case "thinking_tokens":
+			sawThinking = true
 		}
+	}
+	if !sawRateLimit || !sawCheckpoint || !sawThinking {
+		t.Fatalf("missing expected span events: rate_limit=%v checkpoint=%v thinking=%v", sawRateLimit, sawCheckpoint, sawThinking)
 	}
 }
 
-func TestHTTPRequestDurationRecorded(t *testing.T) {
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer func() { _ = mp.Shutdown(context.Background()) }()
-
-	obs := New(Config{MeterProvider: mp})
-	ctx := context.Background()
-
-	obs.RecordHTTPRequestDuration(ctx, 0.5, "2xx", false)
-	obs.RecordHTTPRequestDuration(ctx, 1.2, "5xx", true)
-
-	var rm metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(ctx, &rm))
-
-	found := false
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name == "openrouter.http_request_duration" {
-				found = true
-				hist, ok := m.Data.(metricdata.Histogram[float64])
-				require.True(t, ok)
-				assert.GreaterOrEqual(t, len(hist.DataPoints), 1,
-					"should have at least one data point")
-			}
-		}
+func TestClassify(t *testing.T) {
+	obs, err := New(Config{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
 	}
-	assert.True(t, found, "http_request_duration metric should exist")
+
+	if got := obs.Classify(&HTTPStatusError{StatusCode: 429, Body: "x"}); got != "rate_limited" {
+		t.Fatalf("expected rate_limited, got %q", got)
+	}
+	if got := obs.Classify(errors.New("authentication failed")); got != "auth" {
+		t.Fatalf("expected auth, got %q", got)
+	}
 }

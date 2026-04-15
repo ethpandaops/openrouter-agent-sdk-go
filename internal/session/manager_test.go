@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/ethpandaops/agent-sdk-observability/testkit"
+	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/observability"
 )
 
 func TestCloneCopiesHistoryAndCheckpoints(t *testing.T) {
@@ -107,5 +110,30 @@ func TestFileSnapshotAndRewindRestoresFilesystem(t *testing.T) {
 	}
 	if _, err := os.Stat(extra); !os.IsNotExist(err) {
 		t.Fatalf("expected extra file removed, stat err=%v", err)
+	}
+}
+
+func TestCheckpointObservabilityRecordsMetrics(t *testing.T) {
+	metrics := testkit.NewMetricsHarness()
+	defer func() { _ = metrics.Shutdown(context.Background()) }()
+
+	m := NewManager()
+	obs, err := observability.New(observability.Config{MeterProvider: metrics.Provider()})
+	if err != nil {
+		t.Fatalf("observability.New() error = %v", err)
+	}
+	m.SetObserver(obs)
+
+	s := m.GetOrCreate("default")
+	s.Messages = []map[string]any{{"role": "user", "content": "hello"}}
+	m.Snapshot(context.Background(), "default", "u1")
+	_ = m.Rewind(context.Background(), "default", "missing")
+
+	points, err := metrics.Int64Points(context.Background(), "openrouter.checkpoint_operations_total")
+	if err != nil {
+		t.Fatalf("Int64Points() error = %v", err)
+	}
+	if len(points) != 2 {
+		t.Fatalf("expected 2 checkpoint points, got %d", len(points))
 	}
 }

@@ -127,6 +127,67 @@ Session APIs are local SDK APIs, not remote OpenRouter account sessions.
 
 OpenRouter does not have meaningful backend equivalents for some sibling control-plane methods. The SDK exposes those methods where peer parity matters, but they fail explicitly with `UnsupportedControlError` instead of faking semantics.
 
+## Observability
+
+The SDK emits OpenTelemetry metrics and traces. All providers default to noop —
+no telemetry is emitted unless you opt in via one of these options:
+
+- `WithMeterProvider(metric.MeterProvider)` — any OTel meter provider
+- `WithTracerProvider(trace.TracerProvider)` — any OTel tracer provider
+- `WithPrometheusRegisterer(prometheus.Registerer)` — convenience: builds an
+  OTel meter provider that exports to your Prometheus registry
+
+### Quick start (Prometheus)
+
+```go
+reg := prometheus.NewRegistry()
+http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+
+for msg, err := range sdk.Query(ctx, sdk.Text("hello"),
+    sdk.WithModel("openai/gpt-4o-mini"),
+    sdk.WithPrometheusRegisterer(reg),
+) {
+    // ...
+}
+```
+
+See [`examples/prometheus_metrics`](./examples/prometheus_metrics) for a
+runnable end-to-end example.
+
+### Metrics emitted
+
+GenAI spec metrics (cross-SDK comparable, carry `gen_ai.provider.name=openrouter`):
+
+| OTel name                                          | Prometheus scrape                                        |
+|----------------------------------------------------|----------------------------------------------------------|
+| `gen_ai.client.operation.duration`                 | `gen_ai_client_operation_duration_seconds`               |
+| `gen_ai.client.token.usage`                        | `gen_ai_client_token_usage`                              |
+| `gen_ai.client.operation.time_to_first_chunk`      | `gen_ai_client_operation_time_to_first_chunk_seconds`    |
+
+OpenRouter-specific metrics:
+
+| OTel name                                  | Labels                          |
+|--------------------------------------------|---------------------------------|
+| `openrouter.http_requests_total`           | `status_class`, `retry`         |
+| `openrouter.http_request_duration`         | `status_class`, `retry`         |
+| `openrouter.rate_limit_events_total`       | —                               |
+| `openrouter.tool_calls_total`              | `gen_ai.tool.name`, `outcome`   |
+| `openrouter.tool_call_duration`            | `gen_ai.tool.name`              |
+| `openrouter.checkpoint_operations_total`   | `checkpoint.op`, `outcome`      |
+| `openrouter.hook_dispatch_duration`        | `hook.event`, `outcome`         |
+
+### Spans emitted
+
+| Span name                          | Kind     | Notes                                    |
+|------------------------------------|----------|------------------------------------------|
+| `chat {model}` (GenAI spec format) | CLIENT   | One per query; carries GenAI attributes  |
+| `execute_tool {name}` (spec)       | INTERNAL | Per tool call; `gen_ai.tool.call.id` set |
+| `openrouter.http.request`          | CLIENT   | Per HTTP request, retry events           |
+| `openrouter.hook.dispatch`         | INTERNAL | Per hook event                           |
+
+Duration histograms carry trace exemplars when traces are sampled, so latency
+spikes link directly to traces in Grafana / Tempo / Jaeger.
+
 ## Examples
 
 Runnable examples live under [`examples`](./examples).
