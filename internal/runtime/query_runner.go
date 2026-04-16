@@ -10,14 +10,17 @@ import (
 	"sync"
 	"time"
 
+	agenterrclass "github.com/ethpandaops/agent-sdk-observability/errclass"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/config"
 	sdkerrors "github.com/ethpandaops/openrouter-agent-sdk-go/internal/errors"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/hook"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/mcp"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/message"
+	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/observability"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/permission"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/session"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/tools"
+	upstreamgenai "go.opentelemetry.io/otel/semconv/v1.40.0/genaiconv"
 )
 
 type pendingToolCall struct {
@@ -64,12 +67,20 @@ type QueryRunner struct {
 	hooks     *hook.Dispatcher
 	registry  *tools.Registry
 	executor  *tools.Executor
+	obs       *observability.Observer
 }
 
 // NewQueryRunner creates a QueryRunner.
-func NewQueryRunner(opts *config.Options, sessions *session.Manager) *QueryRunner {
+func NewQueryRunner(
+	opts *config.Options,
+	sessions *session.Manager,
+	obs *observability.Observer,
+) *QueryRunner {
 	if sessions == nil {
 		sessions = session.NewManager()
+	}
+	if obs == nil {
+		obs = observability.Noop()
 	}
 	opts.ApplyDefaults()
 	registry := tools.NewRegistry(opts)
@@ -80,6 +91,7 @@ func NewQueryRunner(opts *config.Options, sessions *session.Manager) *QueryRunne
 		hooks:     NewHookDispatcher(opts),
 		registry:  registry,
 		executor:  tools.NewExecutor(opts, registry),
+		obs:       obs,
 	}
 }
 
@@ -110,6 +122,39 @@ func NewHookDispatcher(opts *config.Options) *hook.Dispatcher {
 		return hook.NewDispatcher(nil)
 	}
 	return hook.NewDispatcher(opts.Hooks)
+}
+
+// runHookWithObs wraps a hook dispatch call with observability instrumentation,
+// creating a span and recording the hook execution duration.
+func (r *QueryRunner) runHookWithObs(
+	ctx context.Context,
+	event hook.Event,
+	toolName string,
+	input hook.Input,
+	toolUseID *string,
+) ([]hook.JSONOutput, error) {
+	hookCtx, hookSpan := r.obs.StartHookSpan(ctx, string(event))
+	start := time.Now()
+	outs, err := r.hooks.Run(hookCtx, event, toolName, input, toolUseID)
+	outcome := "ok"
+	if err != nil {
+		outcome = "error"
+		hookSpan.RecordError(err)
+	} else {
+		hookSpan.SetAttributes(observability.Outcome(outcome))
+	}
+	hookSpan.End()
+	r.obs.RecordHookDuration(hookCtx, time.Since(start).Seconds(), string(event), outcome)
+
+	return outs, err
+}
+
+// observeMessage calls the configured SessionMetricsRecorder for message-level
+// observability (TTFT, token usage, operation duration, span enrichment).
+func (r *QueryRunner) observeMessage(ctx context.Context, msg message.Message) {
+	if r.opts != nil && r.opts.MetricsRecorder != nil {
+		r.opts.MetricsRecorder.Observe(ctx, msg)
+	}
 }
 
 // RunPrompt runs a simple user-content turn and streams message outputs.
@@ -249,6 +294,32 @@ func (r *QueryRunner) RunMessages(
 		s := r.sessions.GetOrCreate(sessionID)
 		runStarted := time.Now()
 
+		// Notify the metrics recorder that a new query is starting (TTFT baseline).
+		if notifier, ok := r.opts.MetricsRecorder.(config.QueryLifecycleNotifier); ok {
+			notifier.MarkQueryStart()
+		}
+
+		// Start query span for the entire conversation turn.
+		model := pickModel(r.opts)
+		ctx, querySpan := r.obs.StartQuerySpan(ctx, upstreamgenai.OperationNameChat, model, sessionID)
+		hasRecorder := r.opts.MetricsRecorder != nil
+		var errType string
+		defer func() {
+			// When a MetricsRecorder is configured, operation duration and
+			// error classification are recorded from the ResultMessage via
+			// the recorder's Observe method. Otherwise, fall back to direct
+			// Observer recording.
+			if !hasRecorder {
+				duration := time.Since(runStarted).Seconds()
+				r.obs.RecordOperationDuration(ctx, duration, upstreamgenai.OperationNameChat, model, agenterrclass.Class(errType))
+			}
+			if errType != "" {
+				querySpan.MarkError(agenterrclass.Class(errType))
+			}
+			// Unset span status implies success — no explicit Ok needed.
+			querySpan.End()
+		}()
+
 		history := session.Clone(s.Messages)
 		if len(history) == 0 {
 			if sys := effectiveSystemPrompt(r.opts); sys != "" {
@@ -267,6 +338,7 @@ func (r *QueryRunner) RunMessages(
 				select {
 				case out <- systemMsg:
 				case <-ctx.Done():
+					errType = "cancelled"
 					errs <- ctx.Err()
 					return
 				}
@@ -279,6 +351,7 @@ func (r *QueryRunner) RunMessages(
 
 		for _, in := range inputs {
 			if r.opts != nil && r.opts.OpenRouterAPIMode == config.OpenRouterAPIModeResponses && in.Message.Content.HasNonTextBlocks() {
+				errType = "invalid_request"
 				errs <- fmt.Errorf("multimodal input requires chat/completions api mode")
 				return
 			}
@@ -297,20 +370,23 @@ func (r *QueryRunner) RunMessages(
 			select {
 			case out <- um:
 			case <-ctx.Done():
+				errType = "cancelled"
 				errs <- ctx.Err()
 				return
 			}
 
-			hookOuts, err := r.hooks.Run(ctx, hook.EventUserPromptSubmit, "", &hook.UserPromptSubmitInput{
+			hookOuts, err := r.runHookWithObs(ctx, hook.EventUserPromptSubmit, "", &hook.UserPromptSubmitInput{
 				BaseInput:     baseInput(sessionID, r.opts),
 				HookEventName: string(hook.EventUserPromptSubmit),
 				Prompt:        in.Message.Content.String(),
 			}, nil)
 			if err != nil {
+				errType = "hook_error"
 				errs <- err
 				return
 			}
 			if err := validateHookOutputs(hook.EventUserPromptSubmit, hookOuts); err != nil {
+				errType = "hook_error"
 				errs <- err
 				return
 			}
@@ -322,9 +398,10 @@ func (r *QueryRunner) RunMessages(
 
 			if r.opts.EnableFileCheckpointing {
 				r.sessions.SetState(sessionID, history, s.UserTurns)
-				r.sessions.Snapshot(sessionID, userID)
+				r.sessions.Snapshot(ctx, sessionID, userID)
 				if r.opts.Cwd != "" {
 					if err := r.sessions.SnapshotFiles(sessionID, userID, r.opts.Cwd); err != nil {
+						errType = "checkpoint_error"
 						errs <- err
 						return
 					}
@@ -416,12 +493,32 @@ func (r *QueryRunner) RunMessages(
 				// If stream already emitted output, do not retry with fallback to avoid
 				// duplicate/partial mixed turn output.
 				if emitted {
+					errType = "transport_error"
 					errs <- runErr
 					return
 				}
 				if i == len(models)-1 {
+					errType = "transport_error"
 					errs <- runErr
 					return
+				}
+			}
+
+			// Update model to reflect the actual model used (may differ
+			// from initial pick after fallback).
+			model = reqModel
+
+			// Record token usage from the completed stream. When a
+			// MetricsRecorder is configured, token recording is handled
+			// by the recorder's observeResult from the ResultMessage.
+			if !hasRecorder && turnUsage != nil {
+				r.obs.RecordTokenUsage(ctx, int64(turnUsage.InputTokens),
+					upstreamgenai.TokenTypeInput, upstreamgenai.OperationNameChat, reqModel)
+				r.obs.RecordTokenUsage(ctx, int64(turnUsage.OutputTokens),
+					upstreamgenai.TokenTypeOutput, upstreamgenai.OperationNameChat, reqModel)
+				if turnUsage.ReasoningOutputTokens > 0 {
+					r.obs.RecordTokenUsage(ctx, int64(turnUsage.ReasoningOutputTokens),
+						upstreamgenai.TokenTypeAttr("thinking"), upstreamgenai.OperationNameChat, reqModel)
 				}
 			}
 
@@ -429,6 +526,7 @@ func (r *QueryRunner) RunMessages(
 				totalCost += turnTotalCost
 			}
 			if r.opts != nil && r.opts.MaxBudgetUSD != nil && turnCostSeen && totalCost > *r.opts.MaxBudgetUSD {
+				errType = "budget_exceeded"
 				msg := fmt.Sprintf("max budget exceeded: spent %.6f > budget %.6f", totalCost, *r.opts.MaxBudgetUSD)
 				res := &message.ResultMessage{
 					Type:          "result",
@@ -452,6 +550,8 @@ func (r *QueryRunner) RunMessages(
 						res, "result", res.Subtype, res,
 					)
 				}
+				r.observeMessage(ctx, res)
+
 				select {
 				case out <- res:
 				case <-ctx.Done():
@@ -479,9 +579,12 @@ func (r *QueryRunner) RunMessages(
 						Content: assistantBlocks,
 					}
 					attachAuditEnvelope(am, "assistant", "final_text", am)
+					r.observeMessage(ctx, am)
+
 					select {
 					case out <- am:
 					case <-ctx.Done():
+						errType = "cancelled"
 						errs <- ctx.Err()
 						return
 					}
@@ -511,15 +614,18 @@ func (r *QueryRunner) RunMessages(
 						},
 					}
 					attachAuditEnvelope(assistantToolMsg, "assistant", "tool_use", assistantToolMsg)
+					r.observeMessage(ctx, assistantToolMsg)
+
 					select {
 					case out <- assistantToolMsg:
 					case <-ctx.Done():
+						errType = "cancelled"
 						errs <- ctx.Err()
 						return
 					}
 
 					toolUseID := c.ID
-					hookOuts, err := r.hooks.Run(ctx, hook.EventPermissionRequest, c.Name, &hook.PermissionRequestInput{
+					hookOuts, err := r.runHookWithObs(ctx, hook.EventPermissionRequest, c.Name, &hook.PermissionRequestInput{
 						BaseInput:             baseInput(sessionID, r.opts),
 						HookEventName:         string(hook.EventPermissionRequest),
 						ToolName:              c.Name,
@@ -527,10 +633,12 @@ func (r *QueryRunner) RunMessages(
 						PermissionSuggestions: nil,
 					}, &toolUseID)
 					if err != nil {
+						errType = "hook_error"
 						errs <- err
 						return
 					}
 					if err := validateHookOutputs(hook.EventPermissionRequest, hookOuts); err != nil {
+						errType = "hook_error"
 						errs <- err
 						return
 					}
@@ -547,8 +655,13 @@ func (r *QueryRunner) RunMessages(
 							Message:   decision.message,
 							Interrupt: decision.interrupt,
 						}
+						toolCtx, toolSpan := r.obs.StartToolSpan(ctx, c.Name, c.ID)
+						toolSpan.RecordError(denyErr)
+						toolSpan.SetAttributes(observability.Outcome("denied"))
+						toolSpan.End()
+						r.obs.RecordToolCall(toolCtx, c.Name, "denied")
 						v := denyErr.Interrupt
-						postFailureOuts, _ := r.hooks.Run(ctx, hook.EventPostToolUseFailure, c.Name, &hook.PostToolUseFailureInput{
+						postFailureOuts, _ := r.runHookWithObs(ctx, hook.EventPostToolUseFailure, c.Name, &hook.PostToolUseFailureInput{
 							BaseInput:     baseInput(sessionID, r.opts),
 							HookEventName: string(hook.EventPostToolUseFailure),
 							ToolName:      c.Name,
@@ -558,10 +671,12 @@ func (r *QueryRunner) RunMessages(
 							IsInterrupt:   &v,
 						}, &toolUseID)
 						if err := validateHookOutputs(hook.EventPostToolUseFailure, postFailureOuts); err != nil {
+							errType = "hook_error"
 							errs <- err
 							return
 						}
 						if denyErr.Interrupt {
+							errType = "permission_denied"
 							msg := denyErr.Error()
 							res := &message.ResultMessage{
 								Type:       "result",
@@ -581,11 +696,12 @@ func (r *QueryRunner) RunMessages(
 							}
 							return
 						}
+						errType = "permission_denied"
 						errs <- denyErr
 						return
 					}
 
-					preToolOuts, err := r.hooks.Run(ctx, hook.EventPreToolUse, c.Name, &hook.PreToolUseInput{
+					preToolOuts, err := r.runHookWithObs(ctx, hook.EventPreToolUse, c.Name, &hook.PreToolUseInput{
 						BaseInput:     baseInput(sessionID, r.opts),
 						HookEventName: string(hook.EventPreToolUse),
 						ToolName:      c.Name,
@@ -593,23 +709,35 @@ func (r *QueryRunner) RunMessages(
 						ToolUseID:     c.ID,
 					}, &toolUseID)
 					if err != nil {
+						errType = "hook_error"
 						errs <- err
 						return
 					}
 					if err := validateHookOutputs(hook.EventPreToolUse, preToolOuts); err != nil {
+						errType = "hook_error"
 						errs <- err
 						return
 					}
 
-					toolOut, err := r.executor.ExecuteWithSuggestions(ctx, c.Name, argsMap, decision.suggestions)
+					toolStart := time.Now()
+					toolCtx, toolSpan := r.obs.StartToolSpan(ctx, c.Name, c.ID)
+					toolOut, err := r.executor.ExecuteWithSuggestions(toolCtx, c.Name, argsMap, decision.suggestions)
+					toolDuration := time.Since(toolStart).Seconds()
+					r.obs.RecordToolCallDuration(toolCtx, toolDuration, c.Name)
 					if err != nil {
+						outcome := "error"
 						var denyErr *sdkerrors.ToolPermissionDeniedError
 						var isInterrupt *bool
 						if stderrors.As(err, &denyErr) {
 							v := denyErr.Interrupt
 							isInterrupt = &v
+							outcome = "denied"
 						}
-						postFailureOuts, _ := r.hooks.Run(ctx, hook.EventPostToolUseFailure, c.Name, &hook.PostToolUseFailureInput{
+						toolSpan.RecordError(err)
+						toolSpan.SetAttributes(observability.Outcome(outcome))
+						toolSpan.End()
+						r.obs.RecordToolCall(toolCtx, c.Name, outcome)
+						postFailureOuts, _ := r.runHookWithObs(ctx, hook.EventPostToolUseFailure, c.Name, &hook.PostToolUseFailureInput{
 							BaseInput:     baseInput(sessionID, r.opts),
 							HookEventName: string(hook.EventPostToolUseFailure),
 							ToolName:      c.Name,
@@ -619,10 +747,12 @@ func (r *QueryRunner) RunMessages(
 							IsInterrupt:   isInterrupt,
 						}, &toolUseID)
 						if hookErr := validateHookOutputs(hook.EventPostToolUseFailure, postFailureOuts); hookErr != nil {
+							errType = "hook_error"
 							errs <- hookErr
 							return
 						}
 						if denyErr != nil && denyErr.Interrupt {
+							errType = "permission_denied"
 							msg := denyErr.Error()
 							res := &message.ResultMessage{
 								Type:       "result",
@@ -642,11 +772,15 @@ func (r *QueryRunner) RunMessages(
 							}
 							return
 						}
+						errType = "tool_error"
 						errs <- err
 						return
 					}
+					// Unset span status implies success.
+					toolSpan.End()
+					r.obs.RecordToolCall(toolCtx, c.Name, "ok")
 
-					postToolOuts, err := r.hooks.Run(ctx, hook.EventPostToolUse, c.Name, &hook.PostToolUseInput{
+					postToolOuts, err := r.runHookWithObs(ctx, hook.EventPostToolUse, c.Name, &hook.PostToolUseInput{
 						BaseInput:     baseInput(sessionID, r.opts),
 						HookEventName: string(hook.EventPostToolUse),
 						ToolName:      c.Name,
@@ -655,10 +789,12 @@ func (r *QueryRunner) RunMessages(
 						ToolResponse:  toolOut,
 					}, &toolUseID)
 					if err != nil {
+						errType = "hook_error"
 						errs <- err
 						return
 					}
 					if err := validateHookOutputs(hook.EventPostToolUse, postToolOuts); err != nil {
+						errType = "hook_error"
 						errs <- err
 						return
 					}
@@ -737,6 +873,8 @@ func (r *QueryRunner) RunMessages(
 					result, "result", result.Subtype, result,
 				)
 			}
+			r.observeMessage(ctx, result)
+
 			select {
 			case out <- result:
 			case <-ctx.Done():
@@ -745,17 +883,19 @@ func (r *QueryRunner) RunMessages(
 			}
 
 			r.sessions.SetState(sessionID, history, s.UserTurns)
-			stopOuts, _ := r.hooks.Run(ctx, hook.EventStop, "", &hook.StopInput{
+			stopOuts, _ := r.runHookWithObs(ctx, hook.EventStop, "", &hook.StopInput{
 				BaseInput:     baseInput(sessionID, r.opts),
 				HookEventName: string(hook.EventStop),
 			}, nil)
 			if err := validateHookOutputs(hook.EventStop, stopOuts); err != nil {
+				errType = "hook_error"
 				errs <- err
 				return
 			}
 			return
 		}
 
+		errType = "max_turns"
 		errs <- fmt.Errorf("max turns reached without terminal response")
 	}()
 
@@ -1297,6 +1437,8 @@ func (r *QueryRunner) runStream(
 ) (string, []message.ImageBlock, map[int]*pendingToolCall, string, *message.Usage, *float64, map[string]any, error, bool) {
 	stream, streamErrs := r.transport.CreateStream(ctx, req)
 
+	streamStart := time.Now()
+	ttftRecorded := false
 	var assistantText strings.Builder
 	assistantImages := []message.ImageBlock{}
 	calls := map[int]*pendingToolCall{}
@@ -1327,6 +1469,15 @@ func (r *QueryRunner) runStream(
 			return true, nil
 		}
 		for _, ch := range chunks {
+			if !ttftRecorded && (ch.Content != "" || len(ch.Images) > 0 || len(ch.ToolDeltas) > 0) {
+				ttftRecorded = true
+				// When no MetricsRecorder is configured, record TTFT
+				// directly via the Observer. Otherwise, the recorder
+				// handles TTFT from AssistantMessage observation.
+				if r.opts.MetricsRecorder == nil {
+					r.obs.RecordTTFT(ctx, time.Since(streamStart).Seconds(), req.Model)
+				}
+			}
 			if ch.Content != "" {
 				content := normalizeAssistantContent(assistantText.String(), ch.Content)
 				if content != "" {
@@ -1341,6 +1492,8 @@ func (r *QueryRunner) runStream(
 						},
 					}
 					attachAuditEnvelope(am, "assistant", "partial_text", am)
+					r.observeMessage(ctx, am)
+
 					select {
 					case out <- am:
 						emitted = true

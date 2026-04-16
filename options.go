@@ -4,6 +4,10 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/config"
 )
 
@@ -585,5 +589,32 @@ func WithStore(store bool) Option {
 func WithOpenRouterExtra(extra map[string]any) Option {
 	return func(o *OpenRouterAgentOptions) {
 		o.OpenRouterExtra = extra
+	}
+}
+
+// ===== Observability =====
+
+// WithMeterProvider sets the OpenTelemetry MeterProvider for SDK metrics.
+// If not set, metrics recording is a noop (no allocations or overhead).
+func WithMeterProvider(mp metric.MeterProvider) Option {
+	return func(o *OpenRouterAgentOptions) {
+		o.MeterProvider = mp
+	}
+}
+
+// WithTracerProvider sets the OpenTelemetry TracerProvider for SDK tracing.
+// If not set, tracing is a noop (no allocations or overhead).
+func WithTracerProvider(tp trace.TracerProvider) Option {
+	return func(o *OpenRouterAgentOptions) {
+		o.TracerProvider = tp
+	}
+}
+
+// WithPrometheusRegisterer configures the OTel-to-Prometheus bridge.
+// When set, the SDK automatically creates a Prometheus-backed MeterProvider.
+// If a MeterProvider is also set via WithMeterProvider, it takes precedence.
+func WithPrometheusRegisterer(reg prometheus.Registerer) Option {
+	return func(o *OpenRouterAgentOptions) {
+		o.PrometheusRegisterer = reg
 	}
 }

@@ -370,11 +370,17 @@ func (c *clientImpl) getCurrentStreams() (<-chan message.Message, <-chan error, 
 	return c.currentMsgs, c.currentErrs, nil
 }
 
+// applyAgentOptionsToConfig applies functional options and initializes the OTel
+// metrics recorder so the Client path has parity with Query/QueryStream.
 func applyAgentOptionsToConfig(opts []Option) *config.Options {
 	options := applyAgentOptions(opts)
 	if options == nil {
 		return nil
 	}
+
+	// Initialize OTel metrics recorder from providers if configured.
+	initMetricsRecorder(options)
+
 	return options
 }
 
@@ -475,7 +481,7 @@ func (c *clientImpl) ActiveSessionID() string {
 }
 
 func (c *clientImpl) Rewind(sessionID, userMessageID string) error {
-	if ok := c.sessions.Rewind(sessionID, userMessageID); !ok {
+	if ok := c.sessions.Rewind(context.Background(), sessionID, userMessageID); !ok {
 		return session.ErrNoCheckpoint
 	}
 	c.mu.Lock()

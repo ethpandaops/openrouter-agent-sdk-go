@@ -1,11 +1,18 @@
 package config
 
 import (
+	"context"
 	"log/slog"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/hook"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/mcp"
+	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/message"
+	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/observability"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/permission"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/userinput"
 )
@@ -50,6 +57,20 @@ const (
 	OpenRouterAPIModeResponses OpenRouterAPIMode = "responses"
 )
 
+// SessionMetricsRecorder is the narrow observability interface used by the SDK runtime.
+// When configured via WithMeterProvider or WithTracerProvider, the SDK creates a recorder
+// that emits OpenTelemetry metrics and traces at existing observation points.
+// The context parameter enables trace correlation and exemplar propagation.
+type SessionMetricsRecorder interface {
+	Observe(ctx context.Context, msg message.Message)
+}
+
+// QueryLifecycleNotifier is optionally implemented by SessionMetricsRecorder
+// implementations that need query lifecycle notifications for TTFT tracking.
+type QueryLifecycleNotifier interface {
+	MarkQueryStart()
+}
+
 // Options contains all SDK options.
 type Options struct {
 	Logger             *slog.Logger
@@ -86,6 +107,21 @@ type Options struct {
 	OutputFormat             map[string]any
 	EnableFileCheckpointing  bool
 	Transport                Transport
+
+	// Observability
+	MeterProvider        metric.MeterProvider
+	TracerProvider       trace.TracerProvider
+	PrometheusRegisterer prometheus.Registerer
+
+	// MetricsRecorder is the internal observability recorder created from OTel providers.
+	// This field is set by the SDK at runtime; users should not set it directly.
+	MetricsRecorder SessionMetricsRecorder
+
+	// Observer is the shared observability helper used for SDK-level span and
+	// duration instrumentation beyond message-based recording (hook dispatch,
+	// explicit tool spans, etc.). Set by the SDK at runtime alongside
+	// MetricsRecorder; consumers should not set this directly.
+	Observer *observability.Observer
 
 	// OpenRouter specific
 	APIKey            string

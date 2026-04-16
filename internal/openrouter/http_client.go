@@ -12,7 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethpandaops/agent-sdk-observability/semconv/httpconv"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/config"
+	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/observability"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/util"
 )
 
@@ -22,6 +24,7 @@ type HTTPTransport struct {
 	client  *http.Client
 	apiKey  string
 	baseURL string
+	obs     *observability.Observer
 
 	mu      sync.Mutex
 	started bool
@@ -35,9 +38,17 @@ func NewHTTPTransport(opts *config.Options) *HTTPTransport {
 	}
 	return &HTTPTransport{
 		opts: opts,
+		obs:  observability.Noop(),
 		client: &http.Client{
 			Timeout: timeout,
 		},
+	}
+}
+
+// SetObserver sets the observability observer for the transport.
+func (t *HTTPTransport) SetObserver(obs *observability.Observer) {
+	if obs != nil {
+		t.obs = obs
 	}
 }
 
@@ -121,15 +132,20 @@ func (t *HTTPTransport) CreateStream(ctx context.Context, req *config.ChatReques
 }
 
 func (t *HTTPTransport) doRequest(ctx context.Context, payload []byte) (*http.Response, error) {
-	u, err := url.JoinPath(strings.TrimSuffix(t.baseURL, "/"), t.endpointPath())
+	endpoint := t.endpointPath()
+	u, err := url.JoinPath(strings.TrimSuffix(t.baseURL, "/"), endpoint)
 	if err != nil {
 		return nil, err
 	}
 
 	var lastErr error
+	reqCtx, reqSpan := t.obs.StartHTTPSpan(ctx, endpoint)
+	defer reqSpan.End()
+
 	for attempt := 0; attempt < 3; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(payload))
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, u, bytes.NewReader(payload))
 		if err != nil {
+			reqSpan.RecordError(err)
 			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+t.apiKey)
@@ -145,26 +161,50 @@ func (t *HTTPTransport) doRequest(ctx context.Context, payload []byte) (*http.Re
 			}
 		}
 
+		isRetry := attempt > 0
+		reqStarted := time.Now()
 		resp, err := t.client.Do(req)
 		if err != nil {
 			lastErr = err
+			reqSpan.RecordError(err)
 		} else {
+			reqDuration := time.Since(reqStarted).Seconds()
+			sc := observability.StatusClassOf(resp.StatusCode)
+			t.obs.RecordHTTPRequest(reqCtx, sc, isRetry)
+			t.obs.RecordHTTPRequestDuration(reqCtx, reqDuration, sc, isRetry)
+			reqSpan.SetAttributes(
+				observability.StatusClass(sc),
+				observability.Retry(isRetry),
+				httpconv.ResponseStatusCode(resp.StatusCode),
+			)
+
+			if resp.StatusCode == 429 {
+				t.obs.RecordRateLimitEvent(reqCtx)
+			}
+
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				// Unset span status implies success; no explicit Ok needed.
 				return resp, nil
 			}
 			raw, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			lastErr = fmt.Errorf("openrouter error status=%d body=%s", resp.StatusCode, string(raw))
+			lastErr = &observability.HTTPStatusError{StatusCode: resp.StatusCode, Body: string(raw)}
+			reqSpan.RecordError(lastErr)
 			if resp.StatusCode < 500 && resp.StatusCode != 429 {
 				return nil, lastErr
 			}
 		}
 
 		if attempt < 2 {
+			delay := util.Backoff(attempt)
+			reqSpan.AddEvent("retry",
+				observability.RetryAttempt(attempt+2),
+				observability.RetryDelay(delay),
+			)
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(util.Backoff(attempt)):
+			case <-time.After(delay):
 			}
 		}
 	}

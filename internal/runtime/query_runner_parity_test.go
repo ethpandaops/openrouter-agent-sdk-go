@@ -54,7 +54,7 @@ func TestRunMessagesInjectsSystemPrompt(t *testing.T) {
 		SystemPrompt: "system text",
 		MaxTurns:     1,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunMessages(context.Background(), "default", []message.StreamingMessage{
 		{
@@ -101,7 +101,7 @@ func TestRunMessagesChatCarriesMultimodalInputBlocks(t *testing.T) {
 		Transport: tr,
 		MaxTurns:  1,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunMessages(context.Background(), "default", []message.StreamingMessage{
 		{
@@ -175,7 +175,7 @@ func TestRunMessagesResponsesRejectsMultimodalInput(t *testing.T) {
 		OpenRouterAPIMode: config.OpenRouterAPIModeResponses,
 		MaxTurns:          1,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunMessages(context.Background(), "default", []message.StreamingMessage{
 		{
@@ -222,7 +222,7 @@ func TestRunMessagesSystemPromptPresetAppendPrecedence(t *testing.T) {
 		},
 		MaxTurns: 1,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunMessages(context.Background(), "default", []message.StreamingMessage{
 		{
@@ -259,7 +259,7 @@ func TestRunMessagesParsesStructuredOutput(t *testing.T) {
 		},
 		MaxTurns: 1,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunMessages(context.Background(), "default", []message.StreamingMessage{
 		{
@@ -333,7 +333,7 @@ func TestRunMessagesResponsesDeduplicatesTerminalTextEvents(t *testing.T) {
 		OpenRouterAPIMode: config.OpenRouterAPIModeResponses,
 		MaxTurns:          1,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunMessages(context.Background(), "default", []message.StreamingMessage{
 		{
@@ -406,7 +406,7 @@ func TestRunMessagesDoesNotLeakFinishReasonIntoResultText(t *testing.T) {
 		Transport: tr,
 		MaxTurns:  1,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunMessages(context.Background(), "default", []message.StreamingMessage{
 		{
@@ -477,7 +477,7 @@ func TestRunMessagesEmitsAssistantImageBlocks(t *testing.T) {
 		Transport: tr,
 		MaxTurns:  1,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunMessages(context.Background(), "default", []message.StreamingMessage{
 		{
@@ -526,7 +526,7 @@ func TestRunMessagesPartialAssistantSkipsFinalDuplicateAssistant(t *testing.T) {
 		IncludePartialMessages: true,
 		MaxTurns:               1,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunMessages(context.Background(), "default", []message.StreamingMessage{
 		{
@@ -815,7 +815,7 @@ func TestRunMessagesEmitsPermissionRequestHook(t *testing.T) {
 		},
 		MaxTurns: 2,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunPrompt(context.Background(), "default", message.NewUserMessageContent("hello"))
 	for range msgs {
@@ -840,7 +840,7 @@ func TestRunMessagesPersistsAssistantToolCallsBeforeToolResults(t *testing.T) {
 		},
 		MaxTurns: 2,
 	}
-	r := NewQueryRunner(opts, sessions)
+	r := NewQueryRunner(opts, sessions, nil)
 
 	msgs, errs := r.RunPrompt(context.Background(), "default", message.NewUserMessageContent("hello"))
 	for range msgs {
@@ -878,7 +878,7 @@ func TestRunMessagesAccumulatesTotalCostAcrossToolLoops(t *testing.T) {
 		},
 		MaxTurns: 2,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunPrompt(context.Background(), "default", message.NewUserMessageContent("hello"))
 	var gotResult *message.ResultMessage
@@ -917,7 +917,7 @@ func TestRunMessagesInterruptDeniedToolEmitsErrorResult(t *testing.T) {
 		},
 		MaxTurns: 2,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunPrompt(context.Background(), "default", message.NewUserMessageContent("hello"))
 
@@ -969,7 +969,7 @@ func TestPermissionRequestHookDecisionDenyInterrupt(t *testing.T) {
 		},
 		MaxTurns: 2,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunPrompt(context.Background(), "default", message.NewUserMessageContent("hello"))
 	var gotResult *message.ResultMessage
@@ -1040,7 +1040,7 @@ func TestPermissionRequestSuggestionsFlowIntoCanUseTool(t *testing.T) {
 		},
 		MaxTurns: 2,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunPrompt(context.Background(), "default", message.NewUserMessageContent("hello"))
 	for range msgs {
@@ -1066,7 +1066,7 @@ func TestRunMessagesUsesFallbackModelOnPrimaryFailure(t *testing.T) {
 		FallbackModel: "fallback-model",
 		MaxTurns:      1,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunPrompt(context.Background(), "default", message.NewUserMessageContent("hello"))
 	var gotResult *message.ResultMessage
@@ -1099,7 +1099,7 @@ func TestRunMessagesNoFallbackAfterPrimaryEmitsOutput(t *testing.T) {
 		FallbackModel: "fallback-model",
 		MaxTurns:      1,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunPrompt(context.Background(), "default", message.NewUserMessageContent("hello"))
 	for range msgs {
@@ -1124,7 +1124,7 @@ func TestRunMessagesPopulatesUsageAndCostMetadata(t *testing.T) {
 		Transport: tr,
 		MaxTurns:  1,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunPrompt(context.Background(), "default", message.NewUserMessageContent("hello"))
 	var gotResult *message.ResultMessage
@@ -1157,7 +1157,7 @@ func TestRunMessagesRespectsMaxBudgetUSD(t *testing.T) {
 		MaxTurns:     1,
 		MaxBudgetUSD: &maxBudget,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunPrompt(context.Background(), "default", message.NewUserMessageContent("hello"))
 	var gotResult *message.ResultMessage
@@ -1192,7 +1192,7 @@ func TestRunMessagesAddsUserMetadataToRequest(t *testing.T) {
 		User:      "user-123",
 		MaxTurns:  1,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunPrompt(context.Background(), "default", message.NewUserMessageContent("hello"))
 	for range msgs {
@@ -1258,7 +1258,7 @@ func TestRunMessagesMapsExpandedOpenRouterFieldsToRequest(t *testing.T) {
 		OpenRouterMetadata:           map[string]any{"k": "v"},
 		OpenRouterExtra:              map[string]any{"trace": true},
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunPrompt(context.Background(), "default", message.NewUserMessageContent("hello"))
 	for range msgs {
@@ -1330,7 +1330,7 @@ func TestRunMessagesUnsupportedSyncHookOutputReturnsTypedError(t *testing.T) {
 		},
 		MaxTurns: 1,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunPrompt(context.Background(), "default", message.NewUserMessageContent("hello"))
 	for range msgs {
@@ -1370,7 +1370,7 @@ func TestRunMessagesUnsupportedAsyncHookOutputReturnsTypedError(t *testing.T) {
 		},
 		MaxTurns: 1,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunPrompt(context.Background(), "default", message.NewUserMessageContent("hello"))
 	for range msgs {
@@ -1434,7 +1434,7 @@ func TestRunMessageIteratorConsumesInputsWhileFirstTurnRunning(t *testing.T) {
 	r := NewQueryRunner(&config.Options{
 		Transport: tr,
 		MaxTurns:  1,
-	}, session.NewManager())
+	}, session.NewManager(), nil)
 
 	secondConsumed := make(chan struct{})
 	inputs := func(yield func(message.StreamingMessage) bool) {
@@ -1504,7 +1504,7 @@ func TestRunMessageIteratorCancellationIsDeterministic(t *testing.T) {
 	r := NewQueryRunner(&config.Options{
 		Transport: &cancelAwareTransport{},
 		MaxTurns:  1,
-	}, session.NewManager())
+	}, session.NewManager(), nil)
 
 	inputs := func(yield func(message.StreamingMessage) bool) {
 		msg := message.StreamingMessage{
@@ -1604,7 +1604,7 @@ func TestRunMessageIteratorToolFlowRemainsFunctionalWhileInputsArrive(t *testing
 			"srv": &mcp.SdkServerConfig{Type: mcp.ServerTypeSDK, Name: "srv", Instance: &testToolServer{}},
 		},
 		MaxTurns: 2,
-	}, session.NewManager())
+	}, session.NewManager(), nil)
 
 	secondConsumed := make(chan struct{})
 	inputs := func(yield func(message.StreamingMessage) bool) {
@@ -1655,7 +1655,7 @@ func TestResultMessageStopReasonSuccess(t *testing.T) {
 		Transport: tr,
 		MaxTurns:  1,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunMessages(context.Background(), "default", []message.StreamingMessage{
 		{
@@ -1718,7 +1718,7 @@ func TestResultMessageStopReasonMaxBudget(t *testing.T) {
 		MaxTurns:     2,
 		MaxBudgetUSD: &budget,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunMessages(context.Background(), "default", []message.StreamingMessage{
 		{
@@ -1869,7 +1869,7 @@ func TestRunMessagesUsageIncludesCachedAndReasoningTokens(t *testing.T) {
 		Transport: tr,
 		MaxTurns:  1,
 	}
-	r := NewQueryRunner(opts, session.NewManager())
+	r := NewQueryRunner(opts, session.NewManager(), nil)
 
 	msgs, errs := r.RunMessages(context.Background(), "default", []message.StreamingMessage{
 		{

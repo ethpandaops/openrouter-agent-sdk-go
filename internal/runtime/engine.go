@@ -1,7 +1,10 @@
 package runtime
 
 import (
+	agenterrclass "github.com/ethpandaops/agent-sdk-observability/errclass"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/config"
+	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/controlplane"
+	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/observability"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/openrouter"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/session"
 )
@@ -16,8 +19,36 @@ func NewEngine(opts *config.Options, sessions *session.Manager) *Engine {
 	if opts.Transport == nil {
 		opts.Transport = openrouter.NewHTTPTransport(opts)
 	}
-	return &Engine{runner: NewQueryRunner(opts, sessions)}
+
+	obs := resolveObserver(opts)
+	// Both are expected control-flow conditions, mapped to InvalidRequest to
+	// keep the error.type label set closed.
+	obs.RegisterSentinel(session.ErrNoCheckpoint, agenterrclass.InvalidRequest)
+	obs.RegisterSentinel(controlplane.ErrUnsupportedControl, agenterrclass.InvalidRequest)
+
+	// Inject observer into the HTTP transport if it's the default type.
+	if ht, ok := opts.Transport.(*openrouter.HTTPTransport); ok {
+		ht.SetObserver(obs)
+	}
+
+	// Inject observer into the session manager.
+	if sessions != nil {
+		sessions.SetObserver(obs)
+	}
+
+	return &Engine{runner: NewQueryRunner(opts, sessions, obs)}
 }
 
 // Runner returns the query runner.
 func (e *Engine) Runner() *QueryRunner { return e.runner }
+
+// resolveObserver returns the Observer set by initMetricsRecorder (via
+// otel.go) when OTel providers were configured. Falls back to a noop
+// Observer so NewEngine stays infallible.
+func resolveObserver(opts *config.Options) *observability.Observer {
+	if opts != nil && opts.Observer != nil {
+		return opts.Observer
+	}
+
+	return observability.Noop()
+}
