@@ -149,6 +149,14 @@ func (r *QueryRunner) runHookWithObs(
 	return outs, err
 }
 
+// observeMessage calls the configured SessionMetricsRecorder for message-level
+// observability (TTFT, token usage, operation duration, span enrichment).
+func (r *QueryRunner) observeMessage(ctx context.Context, msg message.Message) {
+	if r.opts != nil && r.opts.MetricsRecorder != nil {
+		r.opts.MetricsRecorder.Observe(ctx, msg)
+	}
+}
+
 // RunPrompt runs a simple user-content turn and streams message outputs.
 func (r *QueryRunner) RunPrompt(
 	ctx context.Context,
@@ -286,13 +294,25 @@ func (r *QueryRunner) RunMessages(
 		s := r.sessions.GetOrCreate(sessionID)
 		runStarted := time.Now()
 
+		// Notify the metrics recorder that a new query is starting (TTFT baseline).
+		if notifier, ok := r.opts.MetricsRecorder.(config.QueryLifecycleNotifier); ok {
+			notifier.MarkQueryStart()
+		}
+
 		// Start query span for the entire conversation turn.
 		model := pickModel(r.opts)
 		ctx, querySpan := r.obs.StartQuerySpan(ctx, upstreamgenai.OperationNameChat, model, sessionID)
+		hasRecorder := r.opts.MetricsRecorder != nil
 		var errType string
 		defer func() {
-			duration := time.Since(runStarted).Seconds()
-			r.obs.RecordOperationDuration(ctx, duration, upstreamgenai.OperationNameChat, model, agenterrclass.Class(errType))
+			// When a MetricsRecorder is configured, operation duration and
+			// error classification are recorded from the ResultMessage via
+			// the recorder's Observe method. Otherwise, fall back to direct
+			// Observer recording.
+			if !hasRecorder {
+				duration := time.Since(runStarted).Seconds()
+				r.obs.RecordOperationDuration(ctx, duration, upstreamgenai.OperationNameChat, model, agenterrclass.Class(errType))
+			}
 			if errType != "" {
 				querySpan.MarkError(agenterrclass.Class(errType))
 			}
@@ -488,8 +508,10 @@ func (r *QueryRunner) RunMessages(
 			// from initial pick after fallback).
 			model = reqModel
 
-			// Record token usage from the completed stream.
-			if turnUsage != nil {
+			// Record token usage from the completed stream. When a
+			// MetricsRecorder is configured, token recording is handled
+			// by the recorder's observeResult from the ResultMessage.
+			if !hasRecorder && turnUsage != nil {
 				r.obs.RecordTokenUsage(ctx, int64(turnUsage.InputTokens),
 					upstreamgenai.TokenTypeInput, upstreamgenai.OperationNameChat, reqModel)
 				r.obs.RecordTokenUsage(ctx, int64(turnUsage.OutputTokens),
@@ -528,6 +550,8 @@ func (r *QueryRunner) RunMessages(
 						res, "result", res.Subtype, res,
 					)
 				}
+				r.observeMessage(ctx, res)
+
 				select {
 				case out <- res:
 				case <-ctx.Done():
@@ -555,6 +579,8 @@ func (r *QueryRunner) RunMessages(
 						Content: assistantBlocks,
 					}
 					attachAuditEnvelope(am, "assistant", "final_text", am)
+					r.observeMessage(ctx, am)
+
 					select {
 					case out <- am:
 					case <-ctx.Done():
@@ -588,6 +614,8 @@ func (r *QueryRunner) RunMessages(
 						},
 					}
 					attachAuditEnvelope(assistantToolMsg, "assistant", "tool_use", assistantToolMsg)
+					r.observeMessage(ctx, assistantToolMsg)
+
 					select {
 					case out <- assistantToolMsg:
 					case <-ctx.Done():
@@ -845,6 +873,8 @@ func (r *QueryRunner) RunMessages(
 					result, "result", result.Subtype, result,
 				)
 			}
+			r.observeMessage(ctx, result)
+
 			select {
 			case out <- result:
 			case <-ctx.Done():
@@ -1441,7 +1471,12 @@ func (r *QueryRunner) runStream(
 		for _, ch := range chunks {
 			if !ttftRecorded && (ch.Content != "" || len(ch.Images) > 0 || len(ch.ToolDeltas) > 0) {
 				ttftRecorded = true
-				r.obs.RecordTTFT(ctx, time.Since(streamStart).Seconds(), req.Model)
+				// When no MetricsRecorder is configured, record TTFT
+				// directly via the Observer. Otherwise, the recorder
+				// handles TTFT from AssistantMessage observation.
+				if r.opts.MetricsRecorder == nil {
+					r.obs.RecordTTFT(ctx, time.Since(streamStart).Seconds(), req.Model)
+				}
 			}
 			if ch.Content != "" {
 				content := normalizeAssistantContent(assistantText.String(), ch.Content)
@@ -1457,6 +1492,8 @@ func (r *QueryRunner) runStream(
 						},
 					}
 					attachAuditEnvelope(am, "assistant", "partial_text", am)
+					r.observeMessage(ctx, am)
+
 					select {
 					case out <- am:
 						emitted = true

@@ -370,11 +370,17 @@ func (c *clientImpl) getCurrentStreams() (<-chan message.Message, <-chan error, 
 	return c.currentMsgs, c.currentErrs, nil
 }
 
+// applyAgentOptionsToConfig applies functional options and initializes the OTel
+// metrics recorder so the Client path has parity with Query/QueryStream.
 func applyAgentOptionsToConfig(opts []Option) *config.Options {
 	options := applyAgentOptions(opts)
 	if options == nil {
 		return nil
 	}
+
+	// Initialize OTel metrics recorder from providers if configured.
+	initMetricsRecorder(options)
+
 	return options
 }
 

@@ -7,4 +7,5 @@ import "github.com/ethpandaops/agent-sdk-observability/errclass"
 const (
 	ClassUnsupportedHookEvent  errclass.Class = "unsupported_hook_event"
 	ClassUnsupportedHookOutput errclass.Class = "unsupported_hook_output"
+	ClassExecution             errclass.Class = "execution"
 )

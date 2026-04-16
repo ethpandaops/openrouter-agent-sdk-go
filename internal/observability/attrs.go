@@ -29,3 +29,9 @@ func Outcome(v string) attribute.KeyValue       { return OutcomeKey.String(v) }
 func CheckpointOp(v string) attribute.KeyValue  { return CheckpointOpKey.String(v) }
 func HookEvent(v string) attribute.KeyValue     { return HookEventKey.String(v) }
 func ThinkingTokens(v int64) attribute.KeyValue { return ThinkingTokensKey.Int64(v) }
+
+// FinishReasons returns the gen_ai.response.finish_reasons span attribute.
+// Per GenAI semconv this is a string array; OpenRouter has a single stop reason.
+func FinishReasons(reasons ...string) attribute.KeyValue {
+	return attribute.StringSlice("gen_ai.response.finish_reasons", reasons)
+}

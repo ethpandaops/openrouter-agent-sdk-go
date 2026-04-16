@@ -1,8 +1,6 @@
 package runtime
 
 import (
-	"log/slog"
-
 	agenterrclass "github.com/ethpandaops/agent-sdk-observability/errclass"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/config"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/controlplane"
@@ -44,43 +42,13 @@ func NewEngine(opts *config.Options, sessions *session.Manager) *Engine {
 // Runner returns the query runner.
 func (e *Engine) Runner() *QueryRunner { return e.runner }
 
-// resolveObserver creates the Observer based on config options. On any
-// construction error it logs (when a logger is configured) and falls back to
-// a noop Observer so NewEngine stays infallible. Mirrors the existing
-// Prometheus-bridge fallback below.
+// resolveObserver returns the Observer set by initMetricsRecorder (via
+// otel.go) when OTel providers were configured. Falls back to a noop
+// Observer so NewEngine stays infallible.
 func resolveObserver(opts *config.Options) *observability.Observer {
-	if opts == nil {
-		return observability.Noop()
+	if opts != nil && opts.Observer != nil {
+		return opts.Observer
 	}
 
-	cfg := observability.Config{
-		MeterProvider:  opts.MeterProvider,
-		TracerProvider: opts.TracerProvider,
-		Logger:         opts.Logger,
-	}
-
-	// If no MeterProvider but PrometheusRegisterer is set, bridge it.
-	if cfg.MeterProvider == nil && opts.PrometheusRegisterer != nil {
-		mp, err := observability.NewPrometheusMeterProvider(opts.PrometheusRegisterer)
-		if err != nil {
-			if opts.Logger != nil {
-				opts.Logger.Warn("failed to create prometheus meter provider, falling back to noop",
-					slog.String("error", err.Error()),
-				)
-			}
-		} else {
-			cfg.MeterProvider = mp
-		}
-	}
-
-	obs, err := observability.New(cfg)
-	if err != nil {
-		if opts.Logger != nil {
-			opts.Logger.Warn("observability disabled, falling back to noop",
-				slog.String("error", err.Error()),
-			)
-		}
-		return observability.Noop()
-	}
-	return obs
+	return observability.Noop()
 }
