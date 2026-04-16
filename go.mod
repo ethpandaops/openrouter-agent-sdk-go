@@ -3,7 +3,7 @@ module github.com/ethpandaops/openrouter-agent-sdk-go
 go 1.26
 
 require (
-	github.com/ethpandaops/agent-sdk-observability v0.0.0
+	github.com/ethpandaops/agent-sdk-observability v0.0.1
 	github.com/google/jsonschema-go v0.4.2
 	github.com/modelcontextprotocol/go-sdk v1.3.1
 	github.com/prometheus/client_golang v1.23.2
@@ -40,5 +40,3 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/ethpandaops/agent-sdk-observability => ../agent-sdk-observability
