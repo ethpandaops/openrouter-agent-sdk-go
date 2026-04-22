@@ -316,6 +316,7 @@ func newErrorRegistry() *agenterrclass.Registry {
 	// RegisterDefaults().
 	reg.RegisterSentinel(sdkerrors.ErrOperationCancelled, agenterrclass.Canceled)
 	reg.RegisterSentinel(sdkerrors.ErrRequestTimeout, agenterrclass.Timeout)
+	reg.RegisterSentinel(sdkerrors.ErrStreamIdle, agenterrclass.Timeout)
 
 	reg.RegisterMatcher(func(err error) (agenterrclass.Class, bool) {
 		var typed *sdkerrors.ToolPermissionDeniedError

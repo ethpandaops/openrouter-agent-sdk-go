@@ -124,13 +124,15 @@ type Options struct {
 	Observer *observability.Observer
 
 	// OpenRouter specific
-	APIKey            string
-	BaseURL           string
-	OpenRouterAPIMode OpenRouterAPIMode
-	HTTPReferer       string
-	XTitle            string
-	RequestTimeout    *time.Duration
-	MaxToolIterations int
+	APIKey                string
+	BaseURL               string
+	OpenRouterAPIMode     OpenRouterAPIMode
+	HTTPReferer           string
+	XTitle                string
+	RequestTimeout        *time.Duration
+	StreamIdleTimeout     *time.Duration
+	ResponseHeaderTimeout *time.Duration
+	MaxToolIterations     int
 
 	// OpenRouter request fields
 	OpenRouterTopP               *float64

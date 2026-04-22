@@ -326,10 +326,38 @@ func WithXTitle(title string) Option {
 	}
 }
 
-// WithRequestTimeout sets HTTP request timeout for OpenRouter calls.
+// WithRequestTimeout sets an overall wall-clock budget for a single OpenRouter
+// streaming call, applied via context deadline. This covers the complete
+// lifecycle (connect, headers, and full body stream) of one chat completion
+// request including any internal retries.
+//
+// For long reasoning turns or tool retries that stream for extended periods,
+// prefer leaving this unset (default: no overall deadline) and rely on
+// WithStreamIdleTimeout to fail fast on stuck connections. If set, pick a
+// value generous enough to accommodate the slowest turn you expect.
 func WithRequestTimeout(timeout time.Duration) Option {
 	return func(o *OpenRouterAgentOptions) {
 		o.RequestTimeout = &timeout
+	}
+}
+
+// WithStreamIdleTimeout sets the maximum time an SSE stream may produce no
+// bytes before the request is aborted with ErrStreamIdle. The timer resets on
+// every read that returns data (including OpenRouter keepalive comments), so
+// long-but-progressing streams are not affected. Defaults to 120s. Set to 0
+// to disable.
+func WithStreamIdleTimeout(timeout time.Duration) Option {
+	return func(o *OpenRouterAgentOptions) {
+		o.StreamIdleTimeout = &timeout
+	}
+}
+
+// WithResponseHeaderTimeout sets the maximum time to wait for response
+// headers (time to first byte) on OpenRouter requests. This does not apply to
+// body streaming. Defaults to 30s.
+func WithResponseHeaderTimeout(timeout time.Duration) Option {
+	return func(o *OpenRouterAgentOptions) {
+		o.ResponseHeaderTimeout = &timeout
 	}
 }
 

@@ -45,6 +45,9 @@ var (
 	// ErrRequestTimeout indicates a request timed out.
 	ErrRequestTimeout = internalerrors.ErrRequestTimeout
 
+	// ErrStreamIdle indicates a streaming response produced no data within the configured idle window.
+	ErrStreamIdle = internalerrors.ErrStreamIdle
+
 	// ErrSessionNotFound indicates a requested local session does not exist.
 	ErrSessionNotFound = internalerrors.ErrSessionNotFound
 
