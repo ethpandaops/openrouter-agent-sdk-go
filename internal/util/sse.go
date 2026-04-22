@@ -74,9 +74,13 @@ func ParseSSE(ctx context.Context, r io.Reader, out chan<- map[string]any, errs 
 		flush()
 	}
 	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
+		// Non-blocking send so an ctx-cancelled idle-timeout still surfaces
+		// the underlying error rather than being swallowed by ctx.Done().
+		// errs is buffered by the caller; dropping on overflow is acceptable
+		// because prior errors already describe the failure.
 		select {
 		case errs <- err:
-		case <-ctx.Done():
+		default:
 		}
 	}
 }

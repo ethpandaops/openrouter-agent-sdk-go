@@ -14,8 +14,15 @@ import (
 
 	"github.com/ethpandaops/agent-sdk-observability/semconv/httpconv"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/config"
+	internalerrors "github.com/ethpandaops/openrouter-agent-sdk-go/internal/errors"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/observability"
 	"github.com/ethpandaops/openrouter-agent-sdk-go/internal/util"
+)
+
+// Default timeout values for the streaming SSE transport.
+const (
+	defaultStreamIdleTimeout     = 120 * time.Second
+	defaultResponseHeaderTimeout = 30 * time.Second
 )
 
 // HTTPTransport implements config.Transport against OpenRouter chat completions.
@@ -31,16 +38,34 @@ type HTTPTransport struct {
 }
 
 // NewHTTPTransport creates an OpenRouter HTTP transport.
+//
+// The returned *http.Client intentionally has no Client.Timeout set: that
+// field is a hard wall-clock on the entire request lifecycle including body
+// read, which would kill SSE streams mid-body on long reasoning turns. The
+// streaming path relies on:
+//   - ctx cancellation (and, when opts.RequestTimeout is set, a context.WithTimeout
+//     derived from it in CreateStream) for overall budget
+//   - Transport.ResponseHeaderTimeout for a "time to first byte" bound
+//   - a per-stream idle reader (opts.StreamIdleTimeout) for stuck connections
 func NewHTTPTransport(opts *config.Options) *HTTPTransport {
-	timeout := 60 * time.Second
-	if opts != nil && opts.RequestTimeout != nil {
-		timeout = *opts.RequestTimeout
+	headerTimeout := defaultResponseHeaderTimeout
+	if opts != nil && opts.ResponseHeaderTimeout != nil {
+		headerTimeout = *opts.ResponseHeaderTimeout
 	}
+
+	transport, _ := http.DefaultTransport.(*http.Transport)
+	if transport != nil {
+		transport = transport.Clone()
+	} else {
+		transport = &http.Transport{}
+	}
+	transport.ResponseHeaderTimeout = headerTimeout
+
 	return &HTTPTransport{
 		opts: opts,
 		obs:  observability.Noop(),
 		client: &http.Client{
-			Timeout: timeout,
+			Transport: transport,
 		},
 	}
 }
@@ -90,7 +115,21 @@ func (t *HTTPTransport) CreateStream(ctx context.Context, req *config.ChatReques
 			}
 		}()
 
-		if err := t.Start(ctx); err != nil {
+		// Optional overall wall-clock budget. When RequestTimeout is set, apply
+		// it as a context deadline rather than http.Client.Timeout so the stream
+		// body read is bounded by the caller's ctx rather than a transport-level
+		// hard cap that kills progressing streams.
+		if t.opts != nil && t.opts.RequestTimeout != nil {
+			var cancelDeadline context.CancelFunc
+			ctx, cancelDeadline = context.WithTimeout(ctx, *t.opts.RequestTimeout)
+			defer cancelDeadline()
+		}
+
+		// Child context used to abort the stream on idle-read timeout.
+		streamCtx, cancelStream := context.WithCancel(ctx)
+		defer cancelStream()
+
+		if err := t.Start(streamCtx); err != nil {
 			errs <- err
 			close(out)
 			close(errs)
@@ -107,7 +146,7 @@ func (t *HTTPTransport) CreateStream(ctx context.Context, req *config.ChatReques
 			return
 		}
 
-		resp, err := t.doRequest(ctx, payload)
+		resp, err := t.doRequest(streamCtx, payload)
 		if err != nil {
 			errs <- err
 			close(out)
@@ -125,7 +164,19 @@ func (t *HTTPTransport) CreateStream(ctx context.Context, req *config.ChatReques
 			return
 		}
 
-		util.ParseSSE(ctx, resp.Body, out, errs)
+		idleTimeout := defaultStreamIdleTimeout
+		if t.opts != nil && t.opts.StreamIdleTimeout != nil {
+			idleTimeout = *t.opts.StreamIdleTimeout
+		}
+
+		var reader io.Reader = resp.Body
+		if idleTimeout > 0 {
+			idle := util.NewIdleReader(resp.Body, idleTimeout, internalerrors.ErrStreamIdle, cancelStream)
+			defer idle.Stop()
+			reader = idle
+		}
+
+		util.ParseSSE(streamCtx, reader, out, errs)
 	}()
 
 	return out, errs
