@@ -772,9 +772,42 @@ func (r *QueryRunner) RunMessages(
 							}
 							return
 						}
-						errType = "tool_error"
-						errs <- err
-						return
+						errMsg := err.Error()
+						toolErrMsg := &message.AssistantMessage{
+							Type:  "assistant",
+							Model: reqModel,
+							Content: []message.ContentBlock{
+								&message.ToolResultBlock{
+									Type:      message.BlockTypeToolResult,
+									ToolUseID: c.ID,
+									IsError:   true,
+									Content: []message.ContentBlock{
+										&message.TextBlock{Type: message.BlockTypeText, Text: errMsg},
+									},
+								},
+							},
+						}
+						attachAuditEnvelope(toolErrMsg, "assistant", "tool_result", toolErrMsg)
+						select {
+						case out <- toolErrMsg:
+						case <-ctx.Done():
+							errs <- ctx.Err()
+							return
+						}
+						toolCalls = append(toolCalls, map[string]any{
+							"id":   c.ID,
+							"type": "function",
+							"function": map[string]any{
+								"name":      c.Name,
+								"arguments": c.Args.String(),
+							},
+						})
+						toolResultsHistory = append(toolResultsHistory, map[string]any{
+							"role":         "tool",
+							"tool_call_id": c.ID,
+							"content":      errMsg,
+						})
+						continue
 					}
 					// Unset span status implies success.
 					toolSpan.End()
